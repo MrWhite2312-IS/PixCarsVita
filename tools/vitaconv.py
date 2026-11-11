@@ -51,11 +51,41 @@ def pad4(b):
 
 
 # ------------------------------------------------------------------ textures
+def dxt1_to_dxt5(data):
+    """Re-encode DXT1 blocks as DXT5 (DXT5 uploads are proven on the Vita, DXT1 crashed).
+
+    Opaque 4-colour blocks are exact. 3-colour blocks (c0 <= c1) keep their transparent
+    texels exactly via the alpha block; their midpoint colour becomes the 2/3 blend,
+    a barely visible shift.
+    """
+    out = bytearray()
+    for o in range(0, len(data), 8):
+        c0, c1, bits = struct.unpack_from("<HHI", data, o)
+        three = c0 <= c1
+        abits = 0
+        cbits = bits
+        if three:
+            cbits = 0
+            for i in range(16):
+                ix = (bits >> (2 * i)) & 3
+                if ix == 3:
+                    abits |= 1 << (3 * i)  # alpha index 1 -> a1 = 0 (transparent)
+                    ix = 0
+                cbits |= ix << (2 * i)
+        # DXT5 alpha block: a0 = 255, a1 = 0, 16 x 3-bit indices (0 -> 255, 1 -> 0)
+        out += bytes((255, 0)) + abits.to_bytes(6, "little")
+        out += struct.pack("<HHI", c0, c1, cbits)
+    return bytes(out)
+
+
 def texture_blob(raw_dxt):
-    """Keep DXT data as-is (the Vita GPU samples S3TC directly); paletted -> RGBA8."""
+    """DXT3/DXT5 kept as-is, DXT1 re-encoded as DXT5, paletted -> RGBA8."""
     t = dxt.parse(raw_dxt)
     name = dxt.FORMATS[t["format"]][0]
-    if name in TEX_FORMAT:
+    if name == "DXT1":
+        levels = [dxt1_to_dxt5(lv[2]) for lv in t["levels"]]
+        fmt = TEX_FORMAT["DXT5"]
+    elif name in TEX_FORMAT:
         levels = [lv[2] for lv in t["levels"]]
         fmt = TEX_FORMAT[name]
     else:
