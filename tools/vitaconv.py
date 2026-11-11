@@ -82,6 +82,12 @@ def texture_blob(raw_dxt):
     """DXT3/DXT5 kept as-is, DXT1 re-encoded as DXT5, paletted -> RGBA8."""
     t = dxt.parse(raw_dxt)
     name = dxt.FORMATS[t["format"]][0]
+    if min(t["width"], t["height"]) < 16:
+        # vitaGL crashes allocating tiny compressed textures (core dump: memcpy inside
+        # gpu_alloc_compressed_texture for an 8x8 DXT5); keep them as RGBA8, top level only
+        w, h, rgba = dxt.decode(t)
+        out = struct.pack("<4I", 0, w, h, 1) + struct.pack("<I", len(rgba)) + pad4(bytes(rgba))
+        return out
     if name == "DXT1":
         levels = [dxt1_to_dxt5(lv[2]) for lv in t["levels"]]
         fmt = TEX_FORMAT["DXT5"]
