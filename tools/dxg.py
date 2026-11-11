@@ -154,6 +154,36 @@ def parse(buf):
             "lod_flags": lod_flags, "palettes": palettes}
 
 
+def mat_mul(a, b):
+    """Row-major 4x4 product a*b (D3D convention: v' = v * M, translation in row 3)."""
+    return tuple(sum(a[r * 4 + k] * b[k * 4 + c] for k in range(4)) for r in range(4) for c in range(4))
+
+
+def world_matrices(mesh):
+    """Bind-pose world matrix of every node (local * parent_world)."""
+    out = [None] * len(mesh["nodes"])
+
+    def get(i):
+        if out[i] is None:
+            n = mesh["nodes"][i]
+            p = n["parent"]
+            out[i] = n["matrix"] if p < 0 or p == i else mat_mul(n["matrix"], get(p))
+        return out[i]
+
+    for i in range(len(out)):
+        get(i)
+    return out
+
+
+def find_node(mesh, suffix):
+    """Index of the first node whose name ends with `suffix` (case-insensitive), or None."""
+    s = suffix.lower()
+    for i, n in enumerate(mesh["nodes"]):
+        if n["name"].lower().endswith(s):
+            return i
+    return None
+
+
 def strip_to_tris(strip):
     tris = []
     for i in range(len(strip) - 2):

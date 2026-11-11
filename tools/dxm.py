@@ -6,8 +6,9 @@ A .dxm is an INI file describing a multi-pass Direct3D 9 material:
   [ShaderPass_K]       one per pass (K = 1..N):
       VertexShaderName / PixelShaderName   (.xvu / .xpu in misc.pak)
       TextureMap_S=<name>                  texture stage S (1-based); '&Name' = render target
-      TextureCoordinateIndex_S, MipMap_S, MAGFILTER_S, MINFILTER_S, MIPFILTER_S,
-      ADDRESSU_S, ADDRESSV_S, MIPMAPLODBIAS_S ...
+      TextureCoordinateIndex_S, MipMap_S                    (1-based, like TextureMap_S)
+      MAGFILTER_X, MINFILTER_X, MIPFILTER_X, ADDRESSU_X, ADDRESSV_X, MIPMAPLODBIAS_X
+                                           D3D sampler states, 0-based: X = S - 1
       D3D render states: ALPHABLENDENABLE, SRCBLEND, DESTBLEND, BLENDOP, ALPHATESTENABLE,
       ALPHAREF, ALPHAFUNC, ZWRITEENABLE, ZFUNC, CULLMODE, BLENDCOLOR, ...
       ShaderColorScale=r,g,b,a (0..1)  /  ShaderRGBA=r,g,b,a (0..255)
@@ -90,11 +91,11 @@ class Pass:
                     "render_target": v.startswith("&"),
                     "uv_set": int(g(f"TextureCoordinateIndex_{s}", "0") or 0),
                     "mipmap": g(f"MipMap_{s}"),
-                    "mag": d3d_enum(g(f"MAGFILTER_{s}", ""), "D3DTEXF_"),
-                    "min": d3d_enum(g(f"MINFILTER_{s}", ""), "D3DTEXF_"),
-                    "mip": d3d_enum(g(f"MIPFILTER_{s}", ""), "D3DTEXF_"),
-                    "address_u": d3d_enum(g(f"ADDRESSU_{s}", ""), "D3DTADDRESS_"),
-                    "address_v": d3d_enum(g(f"ADDRESSV_{s}", ""), "D3DTADDRESS_"),
+                    "mag": d3d_enum(g(f"MAGFILTER_{s - 1}", ""), "D3DTEXF_"),
+                    "min": d3d_enum(g(f"MINFILTER_{s - 1}", ""), "D3DTEXF_"),
+                    "mip": d3d_enum(g(f"MIPFILTER_{s - 1}", ""), "D3DTEXF_"),
+                    "address_u": d3d_enum(g(f"ADDRESSU_{s - 1}", ""), "D3DTADDRESS_"),
+                    "address_v": d3d_enum(g(f"ADDRESSV_{s - 1}", ""), "D3DTADDRESS_"),
                 }
         b = lambda k, d=None: as_bool(g(k)) if g(k) is not None else d
         self.alpha_blend = b("AlphaBlendEnable", False)

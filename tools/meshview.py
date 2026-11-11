@@ -16,18 +16,113 @@ DATA = os.environ.get("CARS_DATA", os.path.join(os.path.dirname(os.path.abspath(
                                                 "..", "PC data", "Data"))
 
 
-def load_texture(idx, material, near):
-    """Return (w, h, rgba) for a material's base texture, or None."""
+ALPHA_FUNCS = {
+    "NEVER": lambda a, r: False, "LESS": lambda a, r: a < r, "EQUAL": lambda a, r: a == r,
+    "LESSEQUAL": lambda a, r: a <= r, "GREATER": lambda a, r: a > r,
+    "NOTEQUAL": lambda a, r: a != r, "GREATEREQUAL": lambda a, r: a >= r,
+    "ALWAYS": lambda a, r: True,
+}
+
+
+def _tex_from_stage(idx, st, p, mk):
+    tk = idx.find(st["texture"], ".dxt", mk)
+    if not tk:
+        return None
+    w, h, rgba = dxt.decode(dxt.parse(idx.read(tk)))
+    return {
+        "w": w, "h": h, "rgba": rgba,
+        "clamp_u": st["address_u"] in ("CLAMP", "BORDER"),
+        "clamp_v": st["address_v"] in ("CLAMP", "BORDER"),
+        "border_u": st["address_u"] == "BORDER",
+        "border_v": st["address_v"] == "BORDER",
+        # alpha only cuts pixels when the material enables alpha testing;
+        # otherwise it is a mask for other passes (reflection strength etc.)
+        "alpha_test": ALPHA_FUNCS.get(p.alpha_func) if p.alpha_test else None,
+        "ref": p.alpha_ref,
+        "offset": (0.0, 0.0),
+    }
+
+
+def uv_at_point(batch, x, y):
+    """UV of the batch surface under (x, y), projecting along Z (bind pose)."""
+    pos, _, uv = dxg.decode_batch(batch)
+    best = None
+    for a, b, c in dxg.strip_to_tris(batch["strip"]):
+        (ax, ay, _), (bx, by, _), (cx, cy, _) = pos[a], pos[b], pos[c]
+        area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        if abs(area) < 1e-12:
+            continue
+        w0 = ((bx - x) * (cy - y) - (by - y) * (cx - x)) / area
+        w1 = ((cx - x) * (ay - y) - (cy - y) * (ax - x)) / area
+        w2 = 1 - w0 - w1
+        if min(w0, w1, w2) >= -1e-6:
+            return (w0 * uv[a][0] + w1 * uv[b][0] + w2 * uv[c][0],
+                    w0 * uv[a][1] + w1 * uv[b][1] + w2 * uv[c][1])
+    # fallback: nearest vertex
+    for i, (px, py, _) in enumerate(pos):
+        d = (px - x) ** 2 + (py - y) ** 2
+        if best is None or d < best[0]:
+            best = (d, uv[i])
+    return best[1]
+
+
+def load_layers(idx, material, near, mesh=None, batch=None):
+    """Texture layers to draw for a material, in pass order.
+
+    Normally just the first textured pass (later passes are env-map/specular effects).
+    CarsEye materials (the windshield eyes) draw every pass: each pass shifts the UVs
+    so the iris texture is centred on the eye node it animates (<Char>_Eye_R / _Eye_L).
+    """
     mk = idx.find(material, ".dxm", near)
     if not mk:
-        return None
-    for p in dxm.parse(idx.read(mk).decode("latin-1"))["passes"]:
+        return []
+    passes = dxm.parse(idx.read(mk).decode("latin-1"))["passes"]
+    eye_passes = [p for p in passes if any(a.get("algorithm", "").lower() == "carseye" for a in p.animators)]
+    if eye_passes and mesh is not None:
+        world = dxg.world_matrices(mesh)
+        layers = []
+        for p in eye_passes:
+            st = p.stages.get(1)
+            tex = st and not st["render_target"] and _tex_from_stage(idx, st, p, mk)
+            if not tex:
+                continue
+            name = next(a.get("name", "") for a in p.animators if a.get("algorithm", "").lower() == "carseye")
+            node = dxg.find_node(mesh, "_eye_r" if "right" in name.lower() else "_eye_l")
+            if node is not None:
+                x, y = world[node][12], world[node][13]
+                u, v = uv_at_point(batch, x, y)
+                cu = float(next(a.get("ucenter", ".5") for a in p.animators))
+                cv = float(next(a.get("vcenter", ".5") for a in p.animators))
+                tex["offset"] = (cu - u, cv - v)
+            layers.append(tex)
+        return layers
+    for p in passes:
         st = p.stages.get(1)
         if st and not st["render_target"]:
-            tk = idx.find(st["texture"], ".dxt", mk)
-            if tk:
-                return dxt.decode(dxt.parse(idx.read(tk)))
-    return None
+            tex = _tex_from_stage(idx, st, p, mk)
+            if tex:
+                return [tex]
+    return []
+
+
+def sample(tex, u, v):
+    """Point-sample with D3D addressing; returns (r, g, b, a) or None for border."""
+    w, h = tex["w"], tex["h"]
+    x, y = int(u * w), int(v * h)
+    if tex["clamp_u"]:
+        if tex["border_u"] and not 0 <= x < w:
+            return None
+        x = min(max(x, 0), w - 1)
+    else:
+        x %= w
+    if tex["clamp_v"]:
+        if tex["border_v"] and not 0 <= y < h:
+            return None
+        y = min(max(y, 0), h - 1)
+    else:
+        y %= h
+    o = (y * w + x) * 4
+    return tex["rgba"][o:o + 4]
 
 
 def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None):
@@ -64,7 +159,7 @@ def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None):
         nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
         ln = math.sqrt(nx * nx + ny * ny + nz * nz) or 1
         shade = 0.45 + 0.55 * abs(nx * light[0] + ny * light[1] + nz * light[2]) / ln
-        tex = textures[bi] if textures and uvs else None
+        layers = textures[bi] if textures and uvs else None
         flat = bytes((int(60 + 180 * shade), int(50 + 140 * shade), int(40 + 90 * shade), 255))
         P = [(ox + x * sc, oy - y * sc, z) for x, y, z in t]
         minx = max(0, int(min(p[0] for p in P))); maxx = min(size - 1, int(max(p[0] for p in P)) + 1)
@@ -84,15 +179,21 @@ def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None):
                 k = py * size + px
                 if z >= zbuf[k]:
                     continue
-                if tex:
-                    tw, th, td = tex
+                if layers:
                     u = w0 * uvs[0][0] + w1 * uvs[1][0] + w2 * uvs[2][0]
                     v = w0 * uvs[0][1] + w1 * uvs[1][1] + w2 * uvs[2][1]
-                    o = ((int(v * th) % th) * tw + (int(u * tw) % tw)) * 4
-                    if td[o + 3] < 32:  # alpha test
+                    texel = None
+                    for tex in layers:  # each pass replaces where it draws (blend ONE/ZERO)
+                        t = sample(tex, u + tex["offset"][0], v + tex["offset"][1])
+                        if t is None:  # border color (transparent black)
+                            t = b"\0\0\0\0"
+                        if tex["alpha_test"] and not tex["alpha_test"](t[3], tex["ref"]):
+                            continue
+                        texel = t
+                    if texel is None:
                         continue
-                    col = bytes((min(255, int(td[o] * shade)), min(255, int(td[o + 1] * shade)),
-                                 min(255, int(td[o + 2] * shade)), 255))
+                    col = bytes((min(255, int(texel[0] * shade)), min(255, int(texel[1] * shade)),
+                                 min(255, int(texel[2] * shade)), 255))
                 else:
                     col = flat
                 zbuf[k] = z
@@ -120,8 +221,8 @@ def main():
             for b in m["lods"][0]["batches"]:
                 mat = m["materials"][b["material"]]
                 if mat not in cache:
-                    cache[mat] = load_texture(idx, mat, key)
-                    print(f"  {mat}: {'ok' if cache[mat] else 'no texture'}")
+                    cache[mat] = load_layers(idx, mat, key, m, b)
+                    print(f"  {mat}: {len(cache[mat])} layer(s)")
                 textures.append(cache[mat])
     write_png(args[1], *render(m, size, yaw, pitch, textures))
 
