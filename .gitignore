@@ -1,0 +1,6 @@
+# Datos originales del juego: nunca se suben al repo
+PC data/
+extracted/
+*.pak
+*.bik
+__pycache__/
