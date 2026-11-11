@@ -2,7 +2,7 @@
 """Tiny pure-Python software renderer for checking decoded .dxg meshes.
 
 Usage: meshview.py <mesh> <out.png> [yaw_deg] [pitch_deg] [size] [--flat]
-                   [--anim=<path.mot in paks> --time=<seconds> [--order=0231]]
+                   [--anim=<path.mot in paks> --time=<seconds>]
   <mesh> is a .dxg on disk, or a path inside the paks (e.g. data\\Global\\Chars\\McQ\\Anim\\mcq_reg.dxg).
 Renders LOD 0, z-buffered, orthographic, Lambert-shaded. When the mesh comes from the
 paks, each batch is textured with stage 1 of its material's first textured pass
@@ -240,8 +240,7 @@ def main():
         import mot, pose
         idx = idx or dxm.AssetIndex(DATA)
         a = mot.parse(idx.read(opts["anim"].lower().replace("/", "\\")))
-        order = tuple(int(c) for c in opts.get("order", "".join(map(str, pose.QUAT_ORDER))))
-        world = pose.pose_world(m, a, float(opts.get("time", "0")), order)
+        world = pose.pose_world(m, a, float(opts.get("time", "0")))
         skin = pose.skin_matrices(m, world)
         positions = [pose.skin_batch(m, b, skin) for b in m["lods"][0]["batches"]]
     if not os.path.exists(args[0]) and "--flat" not in sys.argv:

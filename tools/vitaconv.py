@@ -22,6 +22,8 @@ VCA (animation, resampled to a fixed rate so the runtime only lerps between fram
   char magic[4] = "VCA1"; u32 n_frames; f32 fps; u32 n_tracks
   track[n_tracks]:  char name[32]; u32 flags (1 rotation, 2 translation)
                     [f32 quat_xyzw[n_frames*4]] [f32 trans[n_frames*3]]
+                    the rotation is applied on top of the node's bind rotation
+                    (local_rot = bind_rot * anim_rot), see tools/pose.py
 
 Usage:
   vitaconv.py char <code> <out_dir> [anim_substring ...]
@@ -196,7 +198,7 @@ def convert_anim(idx, key, ignore=pose.IGNORE_ROTATION):
             prev = None
             for f in range(nf):
                 s = mot.sample_channel(rot[n], f / FPS, "r")
-                q = [s[k] for k in pose.QUAT_ORDER]
+                q = list(pose.decode_quat(s))
                 if prev and sum(x * y for x, y in zip(q, prev)) < 0:
                     q = [-x for x in q]  # keep hemisphere continuity for runtime lerp
                 prev = q

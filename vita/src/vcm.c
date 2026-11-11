@@ -268,10 +268,16 @@ void vcm_pose(VcmModel *m, const VcaAnim *a, float t)
             float *L = local[tr->node];
             if (tr->rot) {
                 const float *q0 = tr->rot + f0 * 4, *q1 = tr->rot + f1 * 4;
-                float q[4];
+                float q[4], R[16], B[16];
                 for (int c = 0; c < 4; c++)
                     q[c] = q0[c] + (q1[c] - q0[c]) * k; /* nlerp; hemisphere fixed offline */
-                quat_to_rows(q, L);
+                quat_to_rows(q, R);
+                /* animation rotation is applied on top of the bind rotation: L = B * R */
+                memcpy(B, m->nodes[tr->node].local, 64);
+                for (int r = 0; r < 3; r++)
+                    for (int c = 0; c < 3; c++)
+                        L[r * 4 + c] = B[r * 4 + 0] * R[0 * 4 + c] + B[r * 4 + 1] * R[1 * 4 + c] +
+                                       B[r * 4 + 2] * R[2 * 4 + c];
             }
             if (tr->trans) {
                 const float *p0 = tr->trans + f0 * 3, *p1 = tr->trans + f1 * 3;
