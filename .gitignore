@@ -4,3 +4,5 @@ extracted/
 *.pak
 *.bik
 __pycache__/
+vita/build/
+*.exe
