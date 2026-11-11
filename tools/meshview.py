@@ -2,6 +2,7 @@
 """Tiny pure-Python software renderer for checking decoded .dxg meshes.
 
 Usage: meshview.py <mesh> <out.png> [yaw_deg] [pitch_deg] [size] [--flat]
+                   [--anim=<path.mot in paks> --time=<seconds> [--order=0231]]
   <mesh> is a .dxg on disk, or a path inside the paks (e.g. data\\Global\\Chars\\McQ\\Anim\\mcq_reg.dxg).
 Renders LOD 0, z-buffered, orthographic, Lambert-shaded. When the mesh comes from the
 paks, each batch is textured with stage 1 of its material's first textured pass
@@ -66,7 +67,7 @@ def uv_at_point(batch, x, y):
     return best[1]
 
 
-def load_layers(idx, material, near, mesh=None, batch=None):
+def load_layers(idx, material, near, mesh=None, batch=None, world=None, skin=None):
     """Texture layers to draw for a material, in pass order.
 
     Normally just the first textured pass (later passes are env-map/specular effects).
@@ -79,7 +80,7 @@ def load_layers(idx, material, near, mesh=None, batch=None):
     passes = dxm.parse(idx.read(mk).decode("latin-1"))["passes"]
     eye_passes = [p for p in passes if any(a.get("algorithm", "").lower() == "carseye" for a in p.animators)]
     if eye_passes and mesh is not None:
-        world = dxg.world_matrices(mesh)
+        bind_world = dxg.world_matrices(mesh)
         layers = []
         for p in eye_passes:
             st = p.stages.get(1)
@@ -89,7 +90,17 @@ def load_layers(idx, material, near, mesh=None, batch=None):
             name = next(a.get("name", "") for a in p.animators if a.get("algorithm", "").lower() == "carseye")
             node = dxg.find_node(mesh, "_eye_r" if "right" in name.lower() else "_eye_l")
             if node is not None:
-                x, y = world[node][12], world[node][13]
+                if world is None:
+                    x, y = bind_world[node][12], bind_world[node][13]
+                else:
+                    # animated gaze: bring the posed eye node back into the bind space of
+                    # the eye surface (skinned to the eye node's parent) and look up UVs there
+                    import pose
+                    par = mesh["nodes"][node]["parent"]
+                    inv = pose.invert_rigid(skin[par])
+                    ep = world[node][12:15]
+                    x = ep[0] * inv[0] + ep[1] * inv[4] + ep[2] * inv[8] + inv[12]
+                    y = ep[0] * inv[1] + ep[1] * inv[5] + ep[2] * inv[9] + inv[13]
                 u, v = uv_at_point(batch, x, y)
                 cu = float(next(a.get("ucenter", ".5") for a in p.animators))
                 cv = float(next(a.get("vcenter", ".5") for a in p.animators))
@@ -125,11 +136,15 @@ def sample(tex, u, v):
     return tex["rgba"][o:o + 4]
 
 
-def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None):
-    """textures: optional list (per batch) of (w, h, rgba) or None."""
+def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None, positions=None, frame=None):
+    """textures: optional per-batch layer lists. positions: optional per-batch posed
+    vertex positions (from pose.skin_batch). frame: optional (cx, cy, span) to keep the
+    camera fixed across several renders."""
     tris = []  # (positions, uvs or None, batch index)
     for bi, b in enumerate(mesh["lods"][0]["batches"]):
         pos, _, uv = dxg.decode_batch(b)
+        if positions is not None:
+            pos = positions[bi]
         for a, c, d in dxg.strip_to_tris(b["strip"]):
             tris.append(((pos[a], pos[c], pos[d]), (uv[a], uv[c], uv[d]) if uv else None, bi))
     if not tris:
@@ -145,10 +160,14 @@ def render(mesh, size=512, yaw=35.0, pitch=20.0, textures=None):
 
     vt = [tuple(view(p) for p in t[0]) for t in tris]
     xs = [p[0] for t in vt for p in t]; ys = [p[1] for t in vt for p in t]
-    span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1
+    if frame:
+        cxm, cym, span = frame
+    else:
+        cxm, cym = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1
     sc = (size * 0.9) / span
-    ox = size / 2 - (max(xs) + min(xs)) / 2 * sc
-    oy = size / 2 + (max(ys) + min(ys)) / 2 * sc
+    ox = size / 2 - cxm * sc
+    oy = size / 2 + cym * sc
     zbuf = [1e30] * (size * size)
     img = bytearray(b"\x20\x22\x28\xff" * (size * size))
     light = (0.4, 0.8, -0.45)
@@ -208,23 +227,33 @@ def main():
     yaw = float(args[2]) if len(args) > 2 else 35
     pitch = float(args[3]) if len(args) > 3 else 20
     size = int(args[4]) if len(args) > 4 else 512
-    textures = None
+    opts = dict(x[2:].split("=", 1) for x in sys.argv[1:] if x.startswith("--") and "=" in x)
+    textures = positions = world = skin = None
+    idx = None
     if os.path.exists(args[0]):
         m = dxg.parse(open(args[0], "rb").read())
     else:
         idx = dxm.AssetIndex(DATA)
         key = args[0].lower().replace("/", "\\")
         m = dxg.parse(idx.read(key))
-        if "--flat" not in sys.argv:
-            cache = {}
-            textures = []
-            for b in m["lods"][0]["batches"]:
-                mat = m["materials"][b["material"]]
-                if mat not in cache:
-                    cache[mat] = load_layers(idx, mat, key, m, b)
-                    print(f"  {mat}: {len(cache[mat])} layer(s)")
-                textures.append(cache[mat])
-    write_png(args[1], *render(m, size, yaw, pitch, textures))
+    if "anim" in opts:
+        import mot, pose
+        idx = idx or dxm.AssetIndex(DATA)
+        a = mot.parse(idx.read(opts["anim"].lower().replace("/", "\\")))
+        order = tuple(int(c) for c in opts.get("order", "".join(map(str, pose.QUAT_ORDER))))
+        world = pose.pose_world(m, a, float(opts.get("time", "0")), order)
+        skin = pose.skin_matrices(m, world)
+        positions = [pose.skin_batch(m, b, skin) for b in m["lods"][0]["batches"]]
+    if not os.path.exists(args[0]) and "--flat" not in sys.argv:
+        cache = {}
+        textures = []
+        for b in m["lods"][0]["batches"]:
+            mat = m["materials"][b["material"]]
+            if mat not in cache:
+                cache[mat] = load_layers(idx, mat, key, m, b, world, skin)
+                print(f"  {mat}: {len(cache[mat])} layer(s)")
+            textures.append(cache[mat])
+    write_png(args[1], *render(m, size, yaw, pitch, textures, positions))
 
 
 if __name__ == "__main__":
