@@ -14,6 +14,7 @@ typedef struct {
     const float *uv;           /* n_verts*2 */
     const uint8_t *rgba;       /* n_verts*4, baked lighting */
     const uint16_t *strip;
+    uint32_t vbo, ibo;         /* GPU buffers, filled by the renderer (0 = none) */
 } VcsBatch;
 
 typedef struct {

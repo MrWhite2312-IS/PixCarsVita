@@ -19,6 +19,7 @@
  * No game data is embedded in the VPK: the user converts their own copy on PC.
  */
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,9 @@ static float *g_uv_tmp;      /* scratch UVs for eye layers */
 static uint8_t *g_col_tmp;   /* scratch vertex colours (CPU lighting) */
 static int g_driver_node = -1;
 
+/* Reserve the C heap before vitaGL takes the remaining memory. */
+int _newlib_heap_size_user = 192 * 1024 * 1024;
+
 #define MAX_SCENES 32
 #define SCENE_FAR 7000.0f
 static VcsScene g_scene;
@@ -66,6 +70,22 @@ static int g_n_scenes, g_scene_cur;
 static void log_msg(const char *s)
 {
     sceClibPrintf("[pixcars] %s\n", s);
+}
+
+/* Progress log on the memory card, flushed line by line so a crash leaves a trace. */
+static void plog(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    sceClibPrintf("[pixcars] %s\n", buf);
+    FILE *f = fopen("ux0:data/pixcars/log.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", buf);
+        fclose(f);
+    }
 }
 
 /* ------------------------------------------------------------------ assets */
@@ -233,6 +253,14 @@ static void free_scene(void)
         return;
     for (uint32_t i = 0; i < g_scene.n_tex; i++)
         glDeleteTextures(1, &g_scene.tex[i].gpu_handle);
+    for (uint32_t m = 0; m < g_scene.n_mesh; m++)
+        for (uint32_t b = 0; b < g_scene.mesh[m].n_batch; b++) {
+            VcsBatch *bt = &g_scene.mesh[m].batch[b];
+            if (bt->vbo)
+                glDeleteBuffers(1, &bt->vbo);
+            if (bt->ibo)
+                glDeleteBuffers(1, &bt->ibo);
+        }
     vcs_free(&g_scene);
     g_scene_loaded = 0;
 }
@@ -242,13 +270,34 @@ static int load_scene(int index)
     char path[256];
     free_scene();
     snprintf(path, sizeof path, DATA_ROOT "scene/%s.vcs", g_scene_names[index]);
+    plog("loading scene %s", path);
     int r = vcs_load_file(&g_scene, path);
     if (r) {
-        sceClibPrintf("[pixcars] cannot load %s (%d)\n", path, r);
+        plog("cannot load %s (%d)", path, r);
         return r;
     }
+    plog("parsed: %u textures, %u meshes, %u instances", g_scene.n_tex, g_scene.n_mesh, g_scene.n_inst);
     for (uint32_t i = 0; i < g_scene.n_tex; i++)
         g_scene.tex[i].gpu_handle = upload_texture(&g_scene.tex[i]);
+    plog("textures uploaded");
+    /* upload geometry once: pos | uv | rgba are contiguous in the file, strips separate */
+    uint32_t bytes = 0;
+    for (uint32_t m = 0; m < g_scene.n_mesh; m++)
+        for (uint32_t b = 0; b < g_scene.mesh[m].n_batch; b++) {
+            VcsBatch *bt = &g_scene.mesh[m].batch[b];
+            GLuint ids[2];
+            glGenBuffers(2, ids);
+            bt->vbo = ids[0];
+            bt->ibo = ids[1];
+            glBindBuffer(GL_ARRAY_BUFFER, bt->vbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizei)(24u * bt->n_verts), bt->pos, GL_STATIC_DRAW);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bt->ibo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizei)(2u * bt->n_idx), bt->strip, GL_STATIC_DRAW);
+            bytes += 24u * bt->n_verts + 2u * bt->n_idx;
+        }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    plog("geometry uploaded: %u KB", bytes / 1024);
     g_scene_loaded = 1;
     sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", g_scene_names[index],
                   g_scene.n_mesh, g_scene.n_inst);
@@ -338,13 +387,17 @@ static void draw_scene(const float eye[3], const float fwd[3])
             } else {
                 glDisable(GL_ALPHA_TEST);
             }
-            glVertexPointer(3, GL_FLOAT, 0, bt->pos);
-            glTexCoordPointer(2, GL_FLOAT, 0, bt->uv);
-            glColorPointer(4, GL_UNSIGNED_BYTE, 0, bt->rgba);
-            glDrawElements(GL_TRIANGLE_STRIP, (GLsizei)bt->n_idx, GL_UNSIGNED_SHORT, bt->strip);
+            glBindBuffer(GL_ARRAY_BUFFER, bt->vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bt->ibo);
+            glVertexPointer(3, GL_FLOAT, 0, (const void *)0);
+            glTexCoordPointer(2, GL_FLOAT, 0, (const void *)(uintptr_t)(12u * bt->n_verts));
+            glColorPointer(4, GL_UNSIGNED_BYTE, 0, (const void *)(uintptr_t)(20u * bt->n_verts));
+            glDrawElements(GL_TRIANGLE_STRIP, (GLsizei)bt->n_idx, GL_UNSIGNED_SHORT, (const void *)0);
         }
         glPopMatrix();
     }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     glDisable(GL_ALPHA_TEST);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -375,8 +428,16 @@ int main(void)
     vglWaitVblankStart(GL_TRUE);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
+    {
+        FILE *f = fopen("ux0:data/pixcars/log.txt", "w"); /* fresh log each run */
+        if (f)
+            fclose(f);
+    }
+    plog("start");
     int have_char = load_character("mcq") == 0;
+    plog("character: %s", have_char ? "ok" : "missing");
     list_scenes();
+    plog("scenes listed: %d", g_n_scenes);
     if (g_n_scenes)
         load_scene(0);
     int mode = have_char ? 0 : 1; /* 0 character, 1 scene */
@@ -434,8 +495,10 @@ int main(void)
         float dt = (float)(now - last) / 1000000.0f;
         last = now;
 
-        if ((pressed & SCE_CTRL_SELECT) && g_scene_loaded && have_char)
+        if ((pressed & SCE_CTRL_SELECT) && g_scene_loaded && have_char) {
             mode = !mode;
+            plog("mode -> %s", mode ? "scene" : "character");
+        }
 
         if (mode == 1) {
             int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
@@ -481,10 +544,15 @@ int main(void)
             glFogf(GL_FOG_END, SCENE_FAR);
             glFogfv(GL_FOG_COLOR, sky);
             scene_camera(cam, cyaw, cpitch, cfwd);
+            static int logged_frames;
+            if (logged_frames < 2)
+                plog("scene frame %d: drawing", logged_frames);
             if (g_scene_loaded)
                 draw_scene(cam, cfwd);
             glDisable(GL_FOG);
             vglSwapBuffers(GL_FALSE);
+            if (logged_frames < 2)
+                plog("scene frame %d: done", logged_frames++);
             continue;
         }
 
