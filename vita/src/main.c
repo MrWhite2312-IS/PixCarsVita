@@ -243,7 +243,6 @@ int main(void)
             glClear(GL_COLOR_BUFFER_BIT);
             vglSwapBuffers(GL_FALSE);
         }
-        vglEnd();
         sceKernelExitProcess(0);
         return 0;
     }
@@ -326,7 +325,6 @@ int main(void)
     vcm_free(&g_model);
     free(g_uv_tmp);
     free(g_col_tmp);
-    vglEnd();
     sceKernelExitProcess(0);
     return 0;
 }

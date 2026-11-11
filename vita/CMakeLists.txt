@@ -40,6 +40,7 @@ target_link_libraries(${PROJECT_NAME}
   SceAppUtil_stub
   SceTouch_stub
   SceLibKernel_stub
+  stdc++
   m
 )
 
