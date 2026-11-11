@@ -20,6 +20,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -std=gnu99 -Wall -ffast-math -mfpu=neon 
 add_executable(${PROJECT_NAME}
   src/main.c
   src/vcm.c
+  src/scene.c
 )
 
 target_link_libraries(${PROJECT_NAME}

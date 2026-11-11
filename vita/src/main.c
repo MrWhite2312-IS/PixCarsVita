@@ -5,10 +5,16 @@
  * (model.vcm + *.vca listed in anims.txt), plays its animations with CPU skinning
  * and draws it with vitaGL's fixed-function pipeline.
  *
- * Controls:  left stick  orbit camera      D-pad up/down  zoom
+ * Character mode (default):
+ *            left stick  orbit camera      D-pad up/down  zoom
  *            L / R       previous / next animation
  *            Cross       pause / resume    Circle        bind pose
- *            Square      toggle lighting   Start         quit
+ *            Square      toggle lighting
+ * Scene mode (Select switches; ux0:data/pixcars/scene/<name>.vcs listed in scenes.txt):
+ *            left stick  move / strafe     right stick   look
+ *            D-pad up/dn rise / descend    R (hold)      fast
+ *            L           next scene
+ * Start      quit
  *
  * No game data is embedded in the VPK: the user converts their own copy on PC.
  */
@@ -24,6 +30,7 @@
 #include <vitaGL.h>
 
 #include "vcm.h"
+#include "scene.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -48,6 +55,13 @@ static int g_n_anims, g_cur = -1;
 static float *g_uv_tmp;      /* scratch UVs for eye layers */
 static uint8_t *g_col_tmp;   /* scratch vertex colours (CPU lighting) */
 static int g_driver_node = -1;
+
+#define MAX_SCENES 32
+#define SCENE_FAR 7000.0f
+static VcsScene g_scene;
+static int g_scene_loaded;
+static char g_scene_names[MAX_SCENES][64];
+static int g_n_scenes, g_scene_cur;
 
 static void log_msg(const char *s)
 {
@@ -212,6 +226,131 @@ static void draw_model(int lighting)
     glDisableClientState(GL_VERTEX_ARRAY);
 }
 
+/* ------------------------------------------------------------------ scenes */
+static void free_scene(void)
+{
+    if (!g_scene_loaded)
+        return;
+    for (uint32_t i = 0; i < g_scene.n_tex; i++)
+        glDeleteTextures(1, &g_scene.tex[i].gpu_handle);
+    vcs_free(&g_scene);
+    g_scene_loaded = 0;
+}
+
+static int load_scene(int index)
+{
+    char path[256];
+    free_scene();
+    snprintf(path, sizeof path, DATA_ROOT "scene/%s.vcs", g_scene_names[index]);
+    int r = vcs_load_file(&g_scene, path);
+    if (r) {
+        sceClibPrintf("[pixcars] cannot load %s (%d)\n", path, r);
+        return r;
+    }
+    for (uint32_t i = 0; i < g_scene.n_tex; i++)
+        g_scene.tex[i].gpu_handle = upload_texture(&g_scene.tex[i]);
+    g_scene_loaded = 1;
+    sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", g_scene_names[index],
+                  g_scene.n_mesh, g_scene.n_inst);
+    return 0;
+}
+
+static void list_scenes(void)
+{
+    FILE *f = fopen(DATA_ROOT "scene/scenes.txt", "r");
+    if (!f)
+        return;
+    char line[64];
+    while (g_n_scenes < MAX_SCENES && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0])
+            snprintf(g_scene_names[g_n_scenes++], 64, "%s", line);
+    }
+    fclose(f);
+}
+
+/* View for an eye in game (D3D, left-handed) space looking along yaw/pitch. */
+static void scene_camera(const float eye[3], float yaw, float pitch, float fwd_out[3])
+{
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float znear = 1.0f;
+    float top = znear * tanf(32.0f * 3.14159265f / 180.0f);
+    float right = top * (float)SCREEN_W / (float)SCREEN_H;
+    glFrustum(-right, right, -top, top, znear, SCENE_FAR);
+
+    float f[3] = { sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch) };
+    memcpy(fwd_out, f, sizeof f);
+    /* to GL (right-handed) space: mirror Z, then a standard lookAt */
+    float e[3] = { eye[0], eye[1], -eye[2] }, g[3] = { f[0], f[1], -f[2] };
+    float sx = -g[2], sy = 0.0f, sz = g[0]; /* s = g x up, up = (0,1,0) */
+    float sl = sqrtf(sx * sx + sz * sz);
+    if (sl < 1e-6f)
+        sl = 1e-6f;
+    sx /= sl;
+    sz /= sl;
+    float ux = sy * g[2] - sz * g[1], uy = sz * g[0] - sx * g[2], uz = sx * g[1] - sy * g[0];
+    float m[16] = {
+        sx, ux, -g[0], 0,
+        sy, uy, -g[1], 0,
+        sz, uz, -g[2], 0,
+        -(sx * e[0] + sy * e[1] + sz * e[2]), -(ux * e[0] + uy * e[1] + uz * e[2]),
+        (g[0] * e[0] + g[1] * e[1] + g[2] * e[2]), 1
+    };
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(m);
+    glScalef(1, 1, -1);
+}
+
+static void draw_scene(const float eye[3], const float fwd[3])
+{
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    for (uint32_t i = 0; i < g_scene.n_inst; i++) {
+        const VcsInstance *in = &g_scene.inst[i];
+        float d[3] = { in->center[0] - eye[0], in->center[1] - eye[1], in->center[2] - eye[2] };
+        float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (dist - in->radius > SCENE_FAR)
+            continue;
+        if (d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2] < -in->radius)
+            continue; /* entirely behind the camera */
+        const VcsMesh *me = &g_scene.mesh[in->mesh];
+        glPushMatrix();
+        glMultMatrixf(in->world);
+        for (uint32_t b = 0; b < me->n_batch; b++) {
+            const VcsBatch *bt = &me->batch[b];
+            const VcmMaterial *mat = &g_scene.mat[bt->material];
+            const VcmLayer *l = &mat->layer[0];
+            if (mat->n_layers && l->tex >= 0) {
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, g_scene.tex[l->tex].gpu_handle);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                                (l->flags & VCM_LAYER_CLAMP_U) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                                (l->flags & VCM_LAYER_CLAMP_V) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+            } else {
+                glDisable(GL_TEXTURE_2D);
+            }
+            if (mat->n_layers && (l->flags & VCM_LAYER_ALPHATEST)) {
+                glEnable(GL_ALPHA_TEST);
+                glAlphaFunc(GL_GREATER, l->alpha_ref / 255.0f);
+            } else {
+                glDisable(GL_ALPHA_TEST);
+            }
+            glVertexPointer(3, GL_FLOAT, 0, bt->pos);
+            glTexCoordPointer(2, GL_FLOAT, 0, bt->uv);
+            glColorPointer(4, GL_UNSIGNED_BYTE, 0, bt->rgba);
+            glDrawElements(GL_TRIANGLE_STRIP, (GLsizei)bt->n_idx, GL_UNSIGNED_SHORT, bt->strip);
+        }
+        glPopMatrix();
+    }
+    glDisable(GL_ALPHA_TEST);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+}
+
 static void set_camera(float yaw, float pitch, float dist, const float target[3])
 {
     glMatrixMode(GL_PROJECTION);
@@ -236,7 +375,12 @@ int main(void)
     vglWaitVblankStart(GL_TRUE);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
-    if (load_character("mcq") != 0) {
+    int have_char = load_character("mcq") == 0;
+    list_scenes();
+    if (g_n_scenes)
+        load_scene(0);
+    int mode = have_char ? 0 : 1; /* 0 character, 1 scene */
+    if (!have_char && !g_scene_loaded) {
         /* nothing to show: red screen so the user knows the data is missing */
         for (int i = 0; i < 300; i++) {
             glClearColor(0.5f, 0.05f, 0.05f, 1);
@@ -259,7 +403,16 @@ int main(void)
     float target[3] = { (mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2 };
     float radius = sqrtf((mx[0] - mn[0]) * (mx[0] - mn[0]) + (mx[1] - mn[1]) * (mx[1] - mn[1]) +
                          (mx[2] - mn[2]) * (mx[2] - mn[2])) / 2;
+    if (!have_char)
+        radius = 10.0f;
     float yaw = 35.0f, pitch = 15.0f, dist = radius * 2.6f;
+    /* free camera for scenes */
+    float cam[3] = { 0, 0, 0 }, cyaw = 0, cpitch = 0, cfwd[3] = { 0, 0, 1 };
+    if (g_scene_loaded) {
+        memcpy(cam, g_scene.start, sizeof cam);
+        cyaw = atan2f(g_scene.start_dir[0], g_scene.start_dir[2]);
+        cpitch = asinf(g_scene.start_dir[1]);
+    }
     float t = 0.0f;
     int paused = 0, lighting = 1;
     uint32_t prev_buttons = 0;
@@ -280,6 +433,60 @@ int main(void)
         SceUInt64 now = sceKernelGetProcessTimeWide();
         float dt = (float)(now - last) / 1000000.0f;
         last = now;
+
+        if ((pressed & SCE_CTRL_SELECT) && g_scene_loaded && have_char)
+            mode = !mode;
+
+        if (mode == 1) {
+            int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
+            int rx = (int)pad.rx - 128, ry = (int)pad.ry - 128;
+            float speed = (pad.buttons & SCE_CTRL_RTRIGGER) ? 2400.0f : 500.0f;
+            if (abs(rx) > 20)
+                cyaw += rx * dt * 0.018f;
+            if (abs(ry) > 20)
+                cpitch -= ry * dt * 0.012f;
+            if (cpitch > 1.4f)
+                cpitch = 1.4f;
+            if (cpitch < -1.4f)
+                cpitch = -1.4f;
+            float fx = sinf(cyaw), fz = cosf(cyaw);
+            if (abs(ly) > 20) {
+                cam[0] -= fx * ly / 128.0f * speed * dt;
+                cam[2] -= fz * ly / 128.0f * speed * dt;
+            }
+            if (abs(lx) > 20) {
+                cam[0] += fz * lx / 128.0f * speed * dt;
+                cam[2] -= fx * lx / 128.0f * speed * dt;
+            }
+            if (pad.buttons & SCE_CTRL_UP)
+                cam[1] += speed * 0.5f * dt;
+            if (pad.buttons & SCE_CTRL_DOWN)
+                cam[1] -= speed * 0.5f * dt;
+            if (g_n_scenes > 1 && (pressed & SCE_CTRL_LTRIGGER)) {
+                g_scene_cur = (g_scene_cur + 1) % g_n_scenes;
+                if (load_scene(g_scene_cur) == 0) {
+                    memcpy(cam, g_scene.start, sizeof cam);
+                    cyaw = atan2f(g_scene.start_dir[0], g_scene.start_dir[2]);
+                    cpitch = asinf(g_scene.start_dir[1]);
+                }
+            }
+
+            glViewport(0, 0, SCREEN_W, SCREEN_H);
+            const float sky[4] = { 0.59f, 0.67f, 0.78f, 1.0f };
+            glClearColor(sky[0], sky[1], sky[2], 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glEnable(GL_FOG);
+            glFogi(GL_FOG_MODE, GL_LINEAR);
+            glFogf(GL_FOG_START, SCENE_FAR * 0.45f);
+            glFogf(GL_FOG_END, SCENE_FAR);
+            glFogfv(GL_FOG_COLOR, sky);
+            scene_camera(cam, cyaw, cpitch, cfwd);
+            if (g_scene_loaded)
+                draw_scene(cam, cfwd);
+            glDisable(GL_FOG);
+            vglSwapBuffers(GL_FALSE);
+            continue;
+        }
 
         int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
         if (abs(lx) > 20) yaw += lx * dt * 1.2f;
@@ -323,6 +530,7 @@ int main(void)
     for (int i = 0; i < g_n_anims; i++)
         vca_free(&g_anims[i].anim);
     vcm_free(&g_model);
+    free_scene();
     free(g_uv_tmp);
     free(g_col_tmp);
     sceKernelExitProcess(0);
