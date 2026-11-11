@@ -277,8 +277,11 @@ static int load_scene(int index)
         return r;
     }
     plog("parsed: %u textures, %u meshes, %u instances", g_scene.n_tex, g_scene.n_mesh, g_scene.n_inst);
-    for (uint32_t i = 0; i < g_scene.n_tex; i++)
-        g_scene.tex[i].gpu_handle = upload_texture(&g_scene.tex[i]);
+    for (uint32_t i = 0; i < g_scene.n_tex; i++) {
+        const VcmTexture *t = &g_scene.tex[i];
+        plog("tex %u: fmt=%u %ux%u levels=%u", i, t->format, t->width, t->height, t->n_levels);
+        g_scene.tex[i].gpu_handle = upload_texture(t);
+    }
     plog("textures uploaded");
     /* upload geometry once: pos | uv | rgba are contiguous in the file, strips separate */
     uint32_t bytes = 0;
@@ -438,8 +441,8 @@ int main(void)
     plog("character: %s", have_char ? "ok" : "missing");
     list_scenes();
     plog("scenes listed: %d", g_n_scenes);
-    if (g_n_scenes)
-        load_scene(0);
+    if (!have_char && g_n_scenes)
+        load_scene(0); /* no character: go straight to the scene */
     int mode = have_char ? 0 : 1; /* 0 character, 1 scene */
     if (!have_char && !g_scene_loaded) {
         /* nothing to show: red screen so the user knows the data is missing */
@@ -495,8 +498,14 @@ int main(void)
         float dt = (float)(now - last) / 1000000.0f;
         last = now;
 
-        if ((pressed & SCE_CTRL_SELECT) && g_scene_loaded && have_char) {
-            mode = !mode;
+        if ((pressed & SCE_CTRL_SELECT) && g_n_scenes && have_char) {
+            if (!g_scene_loaded && load_scene(g_scene_cur) == 0) {
+                memcpy(cam, g_scene.start, sizeof cam);
+                cyaw = atan2f(g_scene.start_dir[0], g_scene.start_dir[2]);
+                cpitch = asinf(g_scene.start_dir[1]);
+            }
+            if (g_scene_loaded)
+                mode = !mode;
             plog("mode -> %s", mode ? "scene" : "character");
         }
 
