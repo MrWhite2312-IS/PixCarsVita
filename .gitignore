@@ -6,3 +6,5 @@ extracted/
 __pycache__/
 vita/build/
 *.exe
+PS2 data/
+*.iso

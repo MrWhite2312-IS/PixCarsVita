@@ -17,8 +17,10 @@ Format (reverse-engineered, little-endian, version -7):
                       f32 pos[3] [+ f32 in_tangent[3], out_tangent[3]]
   rot_channel[rot_channels]:
       u32 key_count; u32 track; u32 unknown
-      key[key_count]: (f32 time unless first key) + quaternion x,y,z,w
-                      as s16 (/32767) or s8 (/127)
+      key[key_count]: (f32 time unless first key) + compressed rotation:
+                      rot16: u16 angle_index; s16 axis[3]   phi = index*pi/4096, axis/32767
+                      rot8:  u8  angle_index; s8  axis[3]   phi = index*pi/256,  axis/127
+                      quaternion = (axis*sin(phi), cos(phi)), absolute local rotation
   scalar_channel[scalar_channels]:     camera field of view in degrees
       u32 key_count; u32 track
       key[key_count]: (f32 time unless first key) + f32 value
@@ -28,7 +30,7 @@ Usage:
   mot.py info <path-in-paks or file.mot>
   mot.py scan                    parse every .mot in the paks
 """
-import os, struct, sys
+import math, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,7 +72,7 @@ def parse(buf):
     if n5:
         raise MotError(f"unknown channel kind in use: {n5}")
 
-    def channel(value_fmt, scale):
+    def channel(value_fmt, decode=None):
         count, track, unk = take("3I")
         if track >= ntracks:
             raise MotError(f"track {track} out of range at {p:#x}")
@@ -78,13 +80,13 @@ def parse(buf):
         for k in range(count):
             t = take("f")[0] if k else 0.0
             v = take(value_fmt)
-            keys.append((t, tuple(x * scale for x in v) if scale != 1 else v))
+            keys.append((t, decode(v) if decode else v))
         return {"track": track, "unknown": unk, "keys": keys}
 
     tfmt = "9f" if tangents else "3f"
-    trans = [channel(tfmt, 1) for _ in range(ntrans)]
-    rfmt, rscale = ("4h", 1 / 32767) if rot16 else ("4b", 1 / 127)
-    rots = [channel(rfmt, rscale) for _ in range(nrot)]
+    trans = [channel(tfmt) for _ in range(ntrans)]
+    rots = [channel("H3h" if rot16 else "B3b", decode_rot16 if rot16 else decode_rot8)
+            for _ in range(nrot)]
     scalars = []
     for _ in range(nscalar):  # camera field of view (degrees)
         count, track = take("2I")
@@ -97,6 +99,28 @@ def parse(buf):
     return {"flag": flag, "frames": frames, "duration": duration, "tracks": tracks,
             "tangents": bool(tangents), "translation": trans, "rotation": rots,
             "scalar": scalars}
+
+
+def _decode_rot(v, steps, scale):
+    """Compressed rotation key -> quaternion (x, y, z, w).
+
+    Format confirmed in the engine's own decoder (PS2 build, SLUS_211.51 @ 0x14fc70,
+    tables built @ 0x4c3910; the PC build carries the same 1/32767 and 1/127 constants):
+      v[0]       unsigned angle index: phi = index * pi / steps   (half angle)
+      v[1..3]    signed rotation axis x, y, z (scaled by 1/32767 or 1/127)
+      q = (axis * sin(phi), cos(phi))
+    """
+    phi = v[0] * math.pi / steps
+    s = math.sin(phi) * scale
+    return (v[1] * s, v[2] * s, v[3] * s, math.cos(phi))
+
+
+def decode_rot16(v):
+    return _decode_rot(v, 4096, 1 / 32767)
+
+
+def decode_rot8(v):
+    return _decode_rot(v, 256, 1 / 127)
 
 
 def sample_channel(ch, t, kind):

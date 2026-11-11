@@ -4,33 +4,17 @@
 Used by meshview.py to render animated poses. Conventions (see mot.py / dxg.py):
   - node matrices are row-major, v' = v * M, translation in row 3
   - animation translation keys are the node's absolute local translation
-  - animation rotation keys are a rotation applied on top of the node's bind local
-    rotation: local_rot = bind_rot * anim_rot (row-vector convention: v * B * R)
-  - stored quaternion components map to (x, y, z, w) via decode_quat()
+  - animation rotation keys are the node's absolute local rotation (x, y, z, w)
 """
 import math, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dxg, mot
 
-# Stored quaternion (c0, c1, c2, c3) -> (x, y, z, w) = (-c3, c2, c0, c1).
-# Evidence: rest keys (0, +-1, 0, 0) decode to identity; the Driver turns about Y
-# (c2) in cutscenes; jaws open about the lateral X axis (c3, sign chosen so mouths
-# open downwards: screams in *_bef_ow*); with this mapping and bind-relative
-# composition the roof/brows, eyelids and mouth deform plausibly in every test pose.
-# The earlier mapping (x = c0) broke jaws and bodies in large rotations.
-QUAT_ORDER = (3, 2, 0, 1)
-QUAT_SIGN = (-1.0, 1.0, 1.0, 1.0)
-
-
-def decode_quat(s, order=QUAT_ORDER, sign=QUAT_SIGN):
-    return tuple(s[k] * g for k, g in zip(order, sign))
-
-# Rotation tracks ignored when posing. OPEN QUESTION: <Char>_Pelvis rotation keys
-# do not decode consistently with any component order (calm poses alternate between
-# values 180 degrees apart). Every pose looks right when they are ignored; in game the
-# pelvis is probably driven by the suspension. Needs confirming in Cars.exe.
-IGNORE_ROTATION = ("_pelvis",)
+# Rotation keys are decoded to (x, y, z, w) by mot.py with the engine's own formula
+# and are the node's ABSOLUTE local rotation (they reproduce the bind pose of every
+# bone in rest animations to within 0.2 degrees, pelvis included).
+IGNORE_ROTATION = ()
 
 
 def quat_to_mat(q):
@@ -56,7 +40,7 @@ def invert_rigid(m):
             nt[0], nt[1], nt[2], 1.0)
 
 
-def pose_world(mesh, anim, t, order=QUAT_ORDER, ignore=IGNORE_ROTATION, sign=QUAT_SIGN):
+def pose_world(mesh, anim, t, ignore=IGNORE_ROTATION):
     """World matrices of every node at time t (nodes without tracks keep bind local)."""
     by_name = {n["name"].lower(): i for i, n in enumerate(mesh["nodes"])}
     local = [list(n["matrix"]) for n in mesh["nodes"]]
@@ -65,11 +49,7 @@ def pose_world(mesh, anim, t, order=QUAT_ORDER, ignore=IGNORE_ROTATION, sign=QUA
         i = by_name.get(name)
         if i is None or any(name.endswith(sfx) for sfx in ignore):
             continue
-        s = mot.sample_channel(ch, t, "r")
-        r = quat_to_mat(decode_quat(s, order, sign))
-        b = list(mesh["nodes"][i]["matrix"])
-        b[12:15] = [0.0, 0.0, 0.0]
-        r = dxg.mat_mul(tuple(b), r)  # bind rotation, then animation rotation
+        r = quat_to_mat(mot.sample_channel(ch, t, "r"))
         local[i][0:3], local[i][4:7], local[i][8:11] = r[0:3], r[4:7], r[8:11]
     for ch in anim["translation"]:
         i = by_name.get(anim["tracks"][ch["track"]].lower())
