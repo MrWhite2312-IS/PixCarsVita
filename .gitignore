@@ -8,3 +8,5 @@ vita/build/
 *.exe
 PS2 data/
 *.iso
+*.psp2dmp
+log.txt
