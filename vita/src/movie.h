@@ -11,5 +11,7 @@ int movie_start(const char *path);
 /* Draw the current frame full-screen; returns 1 while the video is playing. */
 int movie_draw(void);
 void movie_stop(void);
+/* Frames shown by the current / last video (for the log). */
+int movie_frames(void);
 
 #endif

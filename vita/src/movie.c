@@ -20,7 +20,7 @@ static SceAvPlayerHandle g_player; /* a pointer-like handle (looks negative as i
 static GLuint g_tex;
 static volatile int g_audio_on;
 static SceUID g_audio_thread = -1;
-static int g_have_frame;
+static int g_have_frame, g_frames, g_waits;
 
 static void *mem_alloc(void *p, uint32_t align, uint32_t size)
 {
@@ -112,6 +112,7 @@ int movie_start(const char *path)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     }
     g_have_frame = 0;
+    g_frames = g_waits = 0;
     g_audio_on = 1;
     g_audio_thread = sceKernelCreateThread("pixcars_movie_audio", audio_thread, 0x10000100, 0x4000, 0, 0, NULL);
     if (g_audio_thread >= 0)
@@ -123,9 +124,13 @@ int movie_draw(void)
 {
     if (!g_player)
         return 0;
+    /* the player only turns active once the source is opened and buffered: before the first
+       frame, wait (up to ~3 s at 60 Hz) instead of taking "inactive" for the end */
     if (!sceAvPlayerIsActive(g_player)) {
-        movie_stop();
-        return 0;
+        if (g_frames || ++g_waits > 180) {
+            movie_stop();
+            return 0;
+        }
     }
     SceAvPlayerFrameInfo f;
     glBindTexture(GL_TEXTURE_2D, g_tex);
@@ -133,6 +138,7 @@ int movie_draw(void)
         sceGxmTextureInitLinear(vglGetGxmTexture(GL_TEXTURE_2D), f.pData, SCE_GXM_TEXTURE_FORMAT_YVU420P2_CSC1,
                                 f.details.video.width, f.details.video.height, 0);
         g_have_frame = 1;
+        g_frames++;
     }
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -159,6 +165,8 @@ int movie_draw(void)
     }
     return 1;
 }
+
+int movie_frames(void) { return g_frames; }
 
 void movie_stop(void)
 {

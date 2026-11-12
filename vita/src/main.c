@@ -727,6 +727,7 @@ static void play_movie(const char *name)
             break;
         prev = pad.buttons;
     }
+    plog("movie %s: %d frames shown", name, movie_frames());
     movie_stop();
 }
 
