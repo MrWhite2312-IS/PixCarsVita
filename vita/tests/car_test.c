@@ -12,6 +12,8 @@
 
 static CarParams P;
 
+static float dot3f(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
 static void run(Car *c, const ColWorld *w, CarInput in, float secs)
 {
     for (int i = 0; i < (int)(secs * 60); i++)
@@ -70,7 +72,7 @@ int main(int argc, char **argv)
 
     Car c;
     float start[3] = { 0, 0, -1500 };
-    CarInput idle = { 0 }, gas = { 1, 0, 0, 0 }, turn = { 0.6f, 0, 1, 0 }, stop = { 0, 1, 0, 0 };
+    CarInput idle = { 0 }, gas = { .throttle = 1 }, turn = { .throttle = 0.6f, .steer = 1 }, stop = { .brake = 1 };
     car_spawn(&c, &P, &w, start, 0);
     run(&c, &w, idle, 4);
     check_sane(&c);
@@ -112,9 +114,15 @@ int main(int argc, char **argv)
     }
     printf("brake from %.1f mph: stopped in %.2fs (%.2f g)\n", v0 * 0.681818f, tstop, v0 / tstop / 32.174f);
     assert(tstop < 6);
-    run(&c, &w, stop, 3); /* keep holding: reverse */
+    run(&c, &w, stop, 3); /* keep holding: the game holds the car, no reverse yet */
+    printf("hold 3s: %.2f ft/s gear %d hold %d\n", car_speed(&c), c.gear, c.hold);
+    assert(fabsf(car_speed(&c)) < 1.0f && c.gear == 1 && c.hold);
+    run(&c, &w, idle, 0.2f); /* let go: reverse armed (0x388650) */
+    run(&c, &w, stop, 3);    /* press again: reverse after ReverseTime, the brake is the gas */
     printf("reverse 3s: %.1f mph gear %d\n", car_speed(&c) * 0.681818f, c.gear);
     assert(car_speed(&c) < -10 && c.gear == -1);
+    run(&c, &w, gas, 0.1f);
+    assert(c.gear > 0 && !c.rev_ready);
 
     /* reset in place (pos aliases the car): stays where it is */
     float px = c.pos[0], pz = c.pos[2];
@@ -125,17 +133,72 @@ int main(int argc, char **argv)
     car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
     run(&c, &w, gas, 5);
     Car base = c, slide = c;
-    CarInput lock = { 1, 0, 1, 0 }, lock_ps = { 1, 0, 1, 0, 1 };
+    CarInput lock = { .throttle = 1, .steer = 1 }, lock_ps = { .throttle = 1, .steer = 1, .powerslide = 1 };
     run(&base, &w, lock, 1.0f);
     run(&slide, &w, lock_ps, 1.0f);
     float yb = atan2f(base.rot[6], base.rot[8]), ys = atan2f(slide.rot[6], slide.rot[8]);
     printf("powerslide: %.1f mph, yaw after 1s %.2f (grip) vs %.2f (slide), state %d\n",
            car_speed(&c) * 0.681818f, yb, ys, slide.ps);
-    assert(slide.ps == 1 && ys > yb);
+    assert(slide.ps == 1 && slide.front_drive && ys > yb);
     run(&slide, &w, lock, 0.2f);
-    assert(slide.ps == 2); /* exit phase after release */
+    assert(slide.ps == 0 && slide.ps_exit_t > 0); /* exit phase after release */
     run(&slide, &w, lock, 0.5f);
-    assert(slide.ps == 0);
+    assert(slide.ps_exit_t <= 0 && !slide.front_drive);
+
+    /* low-speed slide (donut): full lock and gas from a standstill, no button */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, idle, 1);
+    run(&c, &w, lock, 2);
+    printf("donut: low %d, yaw rate %.2f rad/s, %.1f mph\n", c.ps_low, dot3f(c.angvel, c.rot + 3),
+           car_speed(&c) * 0.681818f);
+    assert(c.ps_low);
+
+    /* jump: stick pulled back, then pushed forward, at speed */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, gas, 4);
+    CarInput back = { .throttle = 1, .steer_y = 1 }, fwd = { .throttle = 1, .steer_y = -1 };
+    run(&c, &w, back, 0.3f);
+    float y0 = c.pos[1], ymax = y0;
+    run(&c, &w, fwd, 1.0f / 60);
+    assert(c.jumped);
+    for (int i = 0; i < 120; i++) {
+        run(&c, &w, gas, 1.0f / 60);
+        ymax = fmaxf(ymax, c.pos[1]);
+    }
+    printf("jump: %.1f mph, apex +%.2f ft\n", car_speed(&c) * 0.681818f, ymax - y0);
+    assert(ymax - y0 > 2.0f);
+
+    /* tilt: L1 + stick right at speed: up on the right wheels */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, gas, 4);
+    CarInput tl = { .throttle = 1, .steer = 0.6f, .tilt = 1 };
+    run(&c, &w, tl, 1.0f);
+    printf("tilt: on %d, right.y %.2f (roll %.0f deg), wheels down %d\n", c.tilt, c.rot[1],
+           asinf(c.rot[1]) * 57.3f, c.grounded);
+    assert(c.tilt && c.rot[1] < -0.3f && c.grounded <= 2);
+    run(&c, &w, gas, 2.0f);
+    assert(!c.tilt && c.rot[4] > 0.95f);
+
+    /* boost: NOX for 33 / 20 s, then empty */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    Car nb = c;
+    CarInput bst = { .boost = 1 };
+    run(&c, &w, bst, 1.5f);
+    run(&nb, &w, gas, 1.5f);
+    printf("boost 1.5s: %.1f mph (gas only %.1f), nox %.1f\n", car_speed(&c) * 0.681818f,
+           car_speed(&nb) * 0.681818f, c.nox);
+    assert(car_speed(&c) > car_speed(&nb) && c.nox < 5);
+
+    /* burnout: gas + brake standing, released after the charge: thrust */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, idle, 1);
+    CarInput both = { .throttle = 1, .brake = 1 };
+    run(&c, &w, both, 1.5f);
+    printf("burnout charge: hold %d charge %d t %.2f speed %.2f\n", c.burn_hold, c.burn_charge, c.burn_t,
+           car_speed(&c));
+    assert(c.burn_charge && c.burn_t < 0 && fabsf(car_speed(&c)) < 3);
+    run(&c, &w, gas, 1.0f / 60);
+    assert(c.burn_t > 0 && !c.burn_charge);
 
     /* straight into the wall at z = 1600 */
     car_spawn(&c, &P, &w, (float[3]){ 0, 0, 1200 }, 0);

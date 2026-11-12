@@ -280,7 +280,10 @@ static float sphere_push(const ColWorld *w, const float p[3], float rad, float n
 }
 
 /* ------------------------------------------------------------------ car parameters */
-/* McQueen's mcq.phy values, used for keys a .phy does not set */
+#define MPH_TO_FTS 1.46666f  /* the PS2 loader's mph -> ft/s factor */
+#define DEG 0.0174533f
+
+/* McQueen's mcq.phy values (file units), used for keys a .phy does not set */
 static const CarParams MCQ_DEFAULTS = {
     .weight = 3000, .gravity_scale = 1.2f, .inertia_scale = { 0.5f, 1, 1 }, .cofg = { 0, -0.2f, 0.7f },
     .restitution = 0.2f, .body_friction = 0.2f, .yaw_rate_limit = 10, .normal_load_scale = 1,
@@ -299,13 +302,23 @@ static const CarParams MCQ_DEFAULTS = {
     .max_k = 2.5f, .pump_torque_scale = 0.1f, .max_pump_torque = 1000,
     .low_rpm = 1000, .low_up = 5500, .low_down = 2000, .high_rpm = 1500, .high_up = 6700, .high_down = 4500,
     .shift_time = 1, .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
-    .aero_area = 35, .aero_drag = 0.3f,
-    .ps_hs_yaw = 1.65f, .ps_min_speed = 23, .ps_max_speed = 200, .ps_threshold = 0.95f,
-    .ps_front = 0.9f, .ps_rear = 0.74f, .ps_torque = 10.8f, .ps_exit_time = 0.45f,
-    .ps_front_exit = 1.2f, .ps_rear_exit = 1.4f, .ps_exit_yaw = 0.9f, .ps_steer_scale = 1.0f,
-    .ps_rear_steer_scale = -0.2f,
+    .reverse_time = 0.1f,
+    .nox_level = 1, .nox_base = 33, .nox_burn = 20, .nox_hp = 3000, .nox_refresh = 5, .nox_refresh_time = 1,
+    .burnout_time = 1, .burnout_charge = 1.2f, .burnout_thrust = 5000,
+    .aero_area = 35, .aero_drag = 0.3f, .aero_min_speed = 120, .nox_streamlining = 0.3f,
+    .airborne_damping = 3000, .air_moment = { -2500, -1000, 0 }, .unroll_gain = 3, .unroll_torque = 1500,
+    .ps_yaw = 3, .ps_hs_yaw = 1.65f, .ps_min_speed = 23, .ps_max_speed = 200, .ps_threshold = 0.95f,
+    .ps_front = 0.9f, .ps_rear = 0.74f, .ps_torque = 10.8f,
+    .ps_ls_front = 1, .ps_ls_rear = 0.3f, .ps_ls_rear_steer = 25, .ps_min_angle = 8, .ps_max_angle = 10,
+    .ps_min_boost = 0, .ps_max_boost = 100,
+    .ps_exit_time = 0.45f, .ps_front_exit = 1.2f, .ps_rear_exit = 1.4f, .ps_exit_yaw = 0.9f,
+    .ps_steer_scale = 1.0f, .ps_rear_steer_scale = -0.2f,
+    .preload_time = 0.08f, .max_preload = 42000, .preload_charge = 10, .max_preload_time = 0,
+    .ws_angle = 50, .ws_roll_gain = -6, .ws_roll_rate_gain = 20000, .ws_steer_scale = 2, .ws_torque_scale = 2,
     .steer_power = 2, .x_rate = 25, .gas_rate = 4, .brake_rate = 20, .reverse_steer = 0.4f,
+    .xdpad_on = 3, .xdpad_off = 2,
     .steer_speed = { 0, 80, 100 }, .steer_scale = { 0.6f, 0.23f, 0.28f },
+    .dpad_speed = { 0, 100, 150 }, .dpad_scale = { 0.75f, 0.3f, 0.1f },
     .cam_offset = { 0, 6, 0 }, .cam_distance = 16,
 };
 
@@ -358,119 +371,167 @@ static void ini_curve(const char *t, const char *sec, const char *pre, TireCurve
 void car_params_parse(CarParams *p, const char *t)
 {
     *p = MCQ_DEFAULTS;
-    if (!t)
-        return;
-    const char *M = "Mass Properties";
-    ini_f(t, M, "Weight", &p->weight, 1);
-    ini_f(t, M, "GravityScale", &p->gravity_scale, 1);
-    ini_f(t, M, "InertiaScale", p->inertia_scale, 3);
-    ini_f(t, M, "CofG", p->cofg, 3);
-    ini_f(t, M, "Restitution", &p->restitution, 1);
-    ini_f(t, M, "BodyFriction", &p->body_friction, 1);
-    ini_f(t, M, "YawRateLimit", &p->yaw_rate_limit, 1);
-    ini_f(t, M, "NormalLoadScale", &p->normal_load_scale, 1);
-    const char *PS = "Powerslide";
-    ini_f(t, PS, "HandBrakeFrictionScale", &p->handbrake_scale, 1);
-    ini_f(t, PS, "PowerslideHighSpeedYawRateLimit", &p->ps_hs_yaw, 1);
-    ini_f(t, PS, "PowerslideMinSpeed", &p->ps_min_speed, 1);
-    ini_f(t, PS, "PowerslideMaxSpeed", &p->ps_max_speed, 1);
-    ini_f(t, PS, "PowerslideThreshold", &p->ps_threshold, 1);
-    ini_f(t, PS, "PowerslideFrontFrictionScale", &p->ps_front, 1);
-    ini_f(t, PS, "PowerslideRearFrictionScale", &p->ps_rear, 1);
-    ini_f(t, PS, "PowerslideTorqueScale", &p->ps_torque, 1);
-    ini_f(t, PS, "PowerslideExitTime", &p->ps_exit_time, 1);
-    ini_f(t, PS, "PowerslideFrontExitFrictionScale", &p->ps_front_exit, 1);
-    ini_f(t, PS, "PowerslideRearExitFrictionScale", &p->ps_rear_exit, 1);
-    ini_f(t, PS, "PowerslideExitYawRateLimit", &p->ps_exit_yaw, 1);
-    ini_f(t, PS, "PowerslideSteeringScale", &p->ps_steer_scale, 1);
-    ini_f(t, PS, "PowerslideRearSteeringScale", &p->ps_rear_steer_scale, 1);
-    static const char *TN[4] = { "FrontLeftTire", "FrontRightTire", "RearLeftTire", "RearRightTire" };
-    for (int i = 0; i < 4; i++) {
-        TireParams *tp = &p->tire[i];
-        char s[64];
-        ini_f(t, TN[i], "MaxCompression", &tp->max_comp, 1);
-        ini_f(t, TN[i], "MaxCompressionRate", &tp->max_comp_rate, 1);
-        ini_f(t, TN[i], "TireRadius", &tp->radius, 1);
-        ini_f(t, TN[i], "Spring", &tp->spring, 1);
-        ini_f(t, TN[i], "TireInertia", &tp->inertia, 1);
-        ini_f(t, TN[i], "BounceDampingRatio", &tp->bounce_damp, 1);
-        ini_f(t, TN[i], "ReboundDampingRatio", &tp->rebound_damp, 1);
-        ini_f(t, TN[i], "MaxSteerAngle", &tp->max_steer, 1);
-        snprintf(s, sizeof s, "%s Surface 1", TN[i]);
-        ini_curve(t, s, "SideForce", &tp->side);
-        ini_curve(t, s, "DriveForce", &tp->drive);
-        ini_f(t, s, "MaxBrakingTorque", &tp->max_brake_torque, 1);
-    }
-    const char *E = "Engine";
-    float f = (float)p->drivetrain;
-    ini_f(t, E, "DriveTrain", &f, 1);
-    p->drivetrain = (int)f;
-    f = (float)p->n_rpm;
-    ini_f(t, E, "NumberOfRPMPoints", &f, 1);
-    if (f >= 2 && f <= 16) {
-        p->n_rpm = (int)f;
-        for (int i = 0; i < p->n_rpm; i++) {
-            char k[24];
-            snprintf(k, sizeof k, "RPM%d", i + 1); ini_f(t, E, k, &p->rpm[i], 1);
-            snprintf(k, sizeof k, "HP%d", i + 1); ini_f(t, E, k, &p->hp[i], 1);
+    if (t) {
+        const char *M = "Mass Properties";
+        ini_f(t, M, "Weight", &p->weight, 1);
+        ini_f(t, M, "GravityScale", &p->gravity_scale, 1);
+        ini_f(t, M, "InertiaScale", p->inertia_scale, 3);
+        ini_f(t, M, "CofG", p->cofg, 3);
+        ini_f(t, M, "Restitution", &p->restitution, 1);
+        ini_f(t, M, "BodyFriction", &p->body_friction, 1);
+        ini_f(t, M, "YawRateLimit", &p->yaw_rate_limit, 1);
+        ini_f(t, M, "NormalLoadScale", &p->normal_load_scale, 1);
+        const char *PS = "Powerslide";
+        ini_f(t, PS, "HandBrakeFrictionScale", &p->handbrake_scale, 1);
+        ini_f(t, PS, "PowerslideYawRateLimit", &p->ps_yaw, 1);
+        ini_f(t, PS, "PowerslideHighSpeedYawRateLimit", &p->ps_hs_yaw, 1);
+        ini_f(t, PS, "PowerslideMinSpeed", &p->ps_min_speed, 1);
+        ini_f(t, PS, "PowerslideMaxSpeed", &p->ps_max_speed, 1);
+        ini_f(t, PS, "PowerslideThreshold", &p->ps_threshold, 1);
+        ini_f(t, PS, "PowerslideLowSpeedFrontFrictionScale", &p->ps_ls_front, 1);
+        ini_f(t, PS, "PowerslideLowSpeedRearFrictionScale", &p->ps_ls_rear, 1);
+        ini_f(t, PS, "PowerslideLowSpeedRearSteerAngle", &p->ps_ls_rear_steer, 1);
+        ini_f(t, PS, "PowerslideFrontFrictionScale", &p->ps_front, 1);
+        ini_f(t, PS, "PowerslideRearFrictionScale", &p->ps_rear, 1);
+        ini_f(t, PS, "PowerslideMinAngle", &p->ps_min_angle, 1);
+        ini_f(t, PS, "PowerslideMaxAngle", &p->ps_max_angle, 1);
+        ini_f(t, PS, "PowerslideTorqueScale", &p->ps_torque, 1);
+        ini_f(t, PS, "PowerslideExitTime", &p->ps_exit_time, 1);
+        ini_f(t, PS, "PowerslideFrontExitFrictionScale", &p->ps_front_exit, 1);
+        ini_f(t, PS, "PowerslideRearExitFrictionScale", &p->ps_rear_exit, 1);
+        ini_f(t, PS, "PowerslideExitYawRateLimit", &p->ps_exit_yaw, 1);
+        ini_f(t, PS, "PowerslideMinBoost", &p->ps_min_boost, 1);
+        ini_f(t, PS, "PowerslideMaxBoost", &p->ps_max_boost, 1);
+        ini_f(t, PS, "PowerslideSteeringScale", &p->ps_steer_scale, 1);
+        ini_f(t, PS, "PowerslideRearSteeringScale", &p->ps_rear_steer_scale, 1);
+        static const char *TN[4] = { "FrontLeftTire", "FrontRightTire", "RearLeftTire", "RearRightTire" };
+        for (int i = 0; i < 4; i++) {
+            TireParams *tp = &p->tire[i];
+            char s[64];
+            ini_f(t, TN[i], "MaxCompression", &tp->max_comp, 1);
+            ini_f(t, TN[i], "MaxCompressionRate", &tp->max_comp_rate, 1);
+            ini_f(t, TN[i], "TireRadius", &tp->radius, 1);
+            ini_f(t, TN[i], "Spring", &tp->spring, 1);
+            ini_f(t, TN[i], "TireInertia", &tp->inertia, 1);
+            ini_f(t, TN[i], "BounceDampingRatio", &tp->bounce_damp, 1);
+            ini_f(t, TN[i], "ReboundDampingRatio", &tp->rebound_damp, 1);
+            ini_f(t, TN[i], "MaxSteerAngle", &tp->max_steer, 1);
+            snprintf(s, sizeof s, "%s Surface 1", TN[i]);
+            ini_curve(t, s, "SideForce", &tp->side);
+            ini_curve(t, s, "DriveForce", &tp->drive);
+            ini_f(t, s, "MaxBrakingTorque", &tp->max_brake_torque, 1);
         }
-    }
-    f = (float)p->n_gears;
-    ini_f(t, E, "NumberOfGears", &f, 1);
-    if (f >= 1 && f <= 8) {
-        p->n_gears = (int)f;
-        for (int i = 0; i < p->n_gears; i++) {
-            char k[24];
-            snprintf(k, sizeof k, "GearRatio%d", i + 1);
-            ini_f(t, E, k, &p->gear[i], 1);
+        const char *E = "Engine";
+        float f = (float)p->drivetrain;
+        ini_f(t, E, "DriveTrain", &f, 1);
+        p->drivetrain = (int)f;
+        f = (float)p->n_rpm;
+        ini_f(t, E, "NumberOfRPMPoints", &f, 1);
+        if (f >= 2 && f <= 16) {
+            p->n_rpm = (int)f;
+            for (int i = 0; i < p->n_rpm; i++) {
+                char k[24];
+                snprintf(k, sizeof k, "RPM%d", i + 1); ini_f(t, E, k, &p->rpm[i], 1);
+                snprintf(k, sizeof k, "HP%d", i + 1); ini_f(t, E, k, &p->hp[i], 1);
+            }
         }
+        f = (float)p->n_gears;
+        ini_f(t, E, "NumberOfGears", &f, 1);
+        if (f >= 1 && f <= 8) {
+            p->n_gears = (int)f;
+            for (int i = 0; i < p->n_gears; i++) {
+                char k[24];
+                snprintf(k, sizeof k, "GearRatio%d", i + 1);
+                ini_f(t, E, k, &p->gear[i], 1);
+            }
+        }
+        ini_f(t, E, "FinalGearRatio", &p->final_ratio, 1);
+        ini_f(t, E, "TransmissionLoss", &p->loss, 1);
+        ini_f(t, E, "MinRPM", &p->min_rpm, 1);
+        ini_f(t, E, "EngineBraking", &p->engine_braking, 1);
+        ini_f(t, E, "EngineInertia", &p->engine_inertia, 1);
+        ini_f(t, E, "IdleThrottle", &p->idle_throttle, 1);
+        ini_f(t, E, "MaxK", &p->max_k, 1);
+        ini_f(t, E, "PumpTorqueScale", &p->pump_torque_scale, 1);
+        ini_f(t, E, "MaxPumpTorque", &p->max_pump_torque, 1);
+        ini_f(t, E, "LowLoadRPM", &p->low_rpm, 1);
+        ini_f(t, E, "LowLoadUpShiftRPM", &p->low_up, 1);
+        ini_f(t, E, "LowLoadDownShiftRPM", &p->low_down, 1);
+        ini_f(t, E, "HighLoadRPM", &p->high_rpm, 1);
+        ini_f(t, E, "HighLoadUpShiftRPM", &p->high_up, 1);
+        ini_f(t, E, "HighLoadDownShiftRPM", &p->high_down, 1);
+        ini_f(t, E, "ShiftTime", &p->shift_time, 1);
+        ini_f(t, E, "ReverseTime", &p->reverse_time, 1);
+        ini_f(t, E, "ShiftUpDuration", &p->shift_up_time, 1);
+        ini_f(t, E, "ShiftUpThrottle", &p->shift_up_throttle, 1);
+        ini_f(t, E, "ShiftDownDuration", &p->shift_down_time, 1);
+        ini_f(t, E, "ShiftDownThrottle", &p->shift_down_throttle, 1);
+        ini_f(t, E, "NOXLevel", &p->nox_level, 1);
+        ini_f(t, E, "NOXBaseVolume", &p->nox_base, 1);
+        ini_f(t, E, "NOXBurnRate", &p->nox_burn, 1);
+        ini_f(t, E, "NOXHPBoost", &p->nox_hp, 1);
+        ini_f(t, E, "NOXRefreshRate", &p->nox_refresh, 1);
+        ini_f(t, E, "NOXRefreshTime", &p->nox_refresh_time, 1);
+        ini_f(t, E, "BurnoutTime", &p->burnout_time, 1);
+        ini_f(t, E, "BurnoutChargeTime", &p->burnout_charge, 1);
+        ini_f(t, E, "BurnoutThrust", &p->burnout_thrust, 1);
+        float cur = 0;
+        ini_f(t, "Tune Ups", "CurrentTuneUp", &cur, 1);
+        if (cur >= 1) {
+            char s[32];
+            snprintf(s, sizeof s, "Tune Up %d", (int)cur);
+            ini_f(t, s, "AeroSurfaceArea", &p->aero_area, 1);
+            ini_f(t, s, "AeroDrag", &p->aero_drag, 1);
+            ini_f(t, s, "AeroMinSpeed", &p->aero_min_speed, 1);
+            ini_f(t, s, "NOXStreamlining", &p->nox_streamlining, 1);
+        }
+        const char *A = "Aerodynamics";
+        ini_f(t, A, "AirborneDamping", &p->airborne_damping, 1);
+        ini_f(t, A, "AirborneControlMoment", p->air_moment, 3);
+        ini_f(t, A, "UnrollGain", &p->unroll_gain, 1);
+        ini_f(t, A, "UnrollTorque", &p->unroll_torque, 1);
+        ini_f(t, A, "UnyawGain", &p->unyaw_gain, 1);
+        ini_f(t, A, "UnyawTorque", &p->unyaw_torque, 1);
+        ini_f(t, "Preload", "PreloadTime", &p->preload_time, 1);
+        ini_f(t, "Preload", "MaxPreload", &p->max_preload, 1);
+        ini_f(t, "Preload", "MaxPreloadTime", &p->max_preload_time, 1);
+        ini_f(t, "Preload", "PreloadChargeRate", &p->preload_charge, 1);
+        const char *W = "Wheelstand";
+        ini_f(t, W, "WheelStandAngle", &p->ws_angle, 1);
+        ini_f(t, W, "WheelStandRollGain", &p->ws_roll_gain, 1);
+        ini_f(t, W, "WheelStandRollRateGain", &p->ws_roll_rate_gain, 1);
+        ini_f(t, W, "WheelStandSteerScale", &p->ws_steer_scale, 1);
+        ini_f(t, W, "WheelStandTorqueScale", &p->ws_torque_scale, 1);
+        const char *J = "Joystick";
+        ini_f(t, J, "SteeringInputPower", &p->steer_power, 1);
+        ini_f(t, J, "XAxisRateLimit", &p->x_rate, 1);
+        ini_f(t, J, "XDPadRateLimitOn", &p->xdpad_on, 1);
+        ini_f(t, J, "XDPadRateLimitOff", &p->xdpad_off, 1);
+        ini_f(t, J, "GasRateLimit", &p->gas_rate, 1);
+        ini_f(t, J, "BrakeRateLimit", &p->brake_rate, 1);
+        ini_f(t, J, "ReverseSteerScale", &p->reverse_steer, 1);
+        for (int i = 0; i < 3; i++) {
+            char k[24];
+            snprintf(k, sizeof k, "SteerSpeed%d", i + 1); ini_f(t, J, k, &p->steer_speed[i], 1);
+            snprintf(k, sizeof k, "SteerScale%d", i + 1); ini_f(t, J, k, &p->steer_scale[i], 1);
+            snprintf(k, sizeof k, "DPadSteerSpeed%d", i + 1); ini_f(t, J, k, &p->dpad_speed[i], 1);
+            snprintf(k, sizeof k, "DPadSteerScale%d", i + 1); ini_f(t, J, k, &p->dpad_scale[i], 1);
+        }
+        ini_f(t, "Camera Properties", "CameraOffset", p->cam_offset, 3);
+        ini_f(t, "Camera Properties", "CameraFollowingDistance", &p->cam_distance, 1);
     }
-    ini_f(t, E, "FinalGearRatio", &p->final_ratio, 1);
-    ini_f(t, E, "TransmissionLoss", &p->loss, 1);
-    ini_f(t, E, "MinRPM", &p->min_rpm, 1);
-    ini_f(t, E, "EngineBraking", &p->engine_braking, 1);
-    ini_f(t, E, "EngineInertia", &p->engine_inertia, 1);
-    ini_f(t, E, "IdleThrottle", &p->idle_throttle, 1);
-    ini_f(t, E, "MaxK", &p->max_k, 1);
-    ini_f(t, E, "PumpTorqueScale", &p->pump_torque_scale, 1);
-    ini_f(t, E, "MaxPumpTorque", &p->max_pump_torque, 1);
-    ini_f(t, E, "LowLoadRPM", &p->low_rpm, 1);
-    ini_f(t, E, "LowLoadUpShiftRPM", &p->low_up, 1);
-    ini_f(t, E, "LowLoadDownShiftRPM", &p->low_down, 1);
-    ini_f(t, E, "HighLoadRPM", &p->high_rpm, 1);
-    ini_f(t, E, "HighLoadUpShiftRPM", &p->high_up, 1);
-    ini_f(t, E, "HighLoadDownShiftRPM", &p->high_down, 1);
-    ini_f(t, E, "ShiftTime", &p->shift_time, 1);
-    ini_f(t, E, "ShiftUpDuration", &p->shift_up_time, 1);
-    ini_f(t, E, "ShiftUpThrottle", &p->shift_up_throttle, 1);
-    ini_f(t, E, "ShiftDownDuration", &p->shift_down_time, 1);
-    ini_f(t, E, "ShiftDownThrottle", &p->shift_down_throttle, 1);
-    float cur = 0;
-    ini_f(t, "Tune Ups", "CurrentTuneUp", &cur, 1);
-    if (cur >= 1) {
-        char s[32];
-        snprintf(s, sizeof s, "Tune Up %d", (int)cur);
-        ini_f(t, s, "AeroSurfaceArea", &p->aero_area, 1);
-        ini_f(t, s, "AeroDrag", &p->aero_drag, 1);
-    }
-    const char *J = "Joystick";
-    ini_f(t, J, "SteeringInputPower", &p->steer_power, 1);
-    ini_f(t, J, "XAxisRateLimit", &p->x_rate, 1);
-    ini_f(t, J, "GasRateLimit", &p->gas_rate, 1);
-    ini_f(t, J, "BrakeRateLimit", &p->brake_rate, 1);
-    ini_f(t, J, "ReverseSteerScale", &p->reverse_steer, 1);
-    for (int i = 0; i < 3; i++) {
-        char k[24];
-        snprintf(k, sizeof k, "SteerSpeed%d", i + 1); ini_f(t, J, k, &p->steer_speed[i], 1);
-        snprintf(k, sizeof k, "SteerScale%d", i + 1); ini_f(t, J, k, &p->steer_scale[i], 1);
-    }
-    ini_f(t, "Camera Properties", "CameraOffset", p->cam_offset, 3);
-    ini_f(t, "Camera Properties", "CameraFollowingDistance", &p->cam_distance, 1);
+    /* unit conversions the PS2 loader applies after reading (0x37d770.., 0x37ec68, 0x37efcc) */
+    p->ps_min_speed *= MPH_TO_FTS;
+    p->ps_max_speed *= MPH_TO_FTS;
+    p->aero_min_speed *= MPH_TO_FTS;
+    p->ps_ls_rear_steer *= DEG;
+    p->ps_min_angle *= DEG;
+    p->ps_max_angle *= DEG;
+    p->ws_angle *= DEG;
 }
 
 /* ------------------------------------------------------------------ car */
 #define G_FT 32.174f         /* ft/s^2; weights are in pounds, forces in lbf, mass in slugs */
-#define RHO_AIR 0.00238f     /* slug/ft^3, sea level */
 #define MPH 0.681818f        /* mph per ft/s */
 #define RPM_PER_RADS 9.5492966f
 #define BIND_WHEEL_Y 0.96f   /* wheel centre height in McQueen's bind pose (wheel*_root nodes) */
@@ -520,6 +581,13 @@ static void to_world(const Car *c, const float l[3], float o[3])
         o[k] = c->pos[k] + l[0] * c->rot[k] + l[1] * c->rot[3 + k] + l[2] * c->rot[6 + k];
 }
 
+/* local (right, up, fwd) vector to world */
+static void dir_world(const Car *c, const float l[3], float o[3])
+{
+    for (int k = 0; k < 3; k++)
+        o[k] = l[0] * c->rot[k] + l[1] * c->rot[3 + k] + l[2] * c->rot[6 + k];
+}
+
 void car_spawn(Car *c, const CarParams *p, const ColWorld *w, const float pos[3], float yaw)
 {
     /* pos may alias c->pos (reset in place): read it before clearing the car; start the ray just
@@ -534,6 +602,14 @@ void car_spawn(Car *c, const CarParams *p, const ColWorld *w, const float pos[3]
     float s = sinf(yaw), co = cosf(yaw);
     float rot[9] = { co, 0, -s, 0, 1, 0, s, 0, co };
     memcpy(c->rot, rot, sizeof rot);
+    for (int i = 0; i < 4; i++)
+        c->lat_scale[i] = 1.0f;
+    c->yaw_limit = p->yaw_rate_limit;
+    c->boost = c->torque_scale = 1.0f;
+    c->rev_t = p->reverse_time;
+    c->jump_since = 1.0f;
+    c->ps_armed = 1;
+    c->nox = p->nox_base * p->nox_level; /* engine 0x2253a0: starts full */
 }
 
 float car_speed(const Car *c) { return dot3(c->vel, c->rot + 6); }
@@ -548,21 +624,45 @@ static float interp(const float *xs, const float *ys, int n, float x)
     return ys[n - 1];
 }
 
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static float sgnf(float v) { return v < 0 ? -1.0f : 1.0f; }
+/* the game's two-point lerp, clamped to the end values (inlined all over 0x37fc90) */
+static float lerp2(float x, float x0, float y0, float x1, float y1)
+{
+    if (x0 == x1)
+        return y0;
+    return clampf(y0 + (x - x0) / (x1 - x0) * (y1 - y0), fminf(y0, y1), fmaxf(y0, y1));
+}
+
+static int driven_wheel(const Car *c, int i)
+{
+    if (c->front_drive) /* powerslide: the engine drives the front pair (0x225070 in 0x382320) */
+        return i < 2;
+    const CarParams *p = c->p;
+    return p->drivetrain == 2 || (p->drivetrain == 1 ? i >= 2 : i < 2);
+}
+
 /* Engine and torque converter as the PS2 game runs them (0x225810; setters 0x2250a0-0x2253a0).
-   Returns the hub torque summed over the driven wheels (lb-ft); updates rpm and the gearbox. */
+   Returns the hub torque summed over the driven wheels (lb-ft); updates rpm, NOX and the gearbox. */
 static float drivetrain(Car *c, float dt)
 {
     const CarParams *p = c->p;
     int reverse = c->gear < 0;
     float dir = reverse ? -1.0f : 1.0f;
     float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
-    float load = reverse ? c->brake : c->gas;
+    float load = c->gas; /* in reverse the controls feed the brake into the throttle */
     if (c->rpm < p->min_rpm)
         c->rpm = p->min_rpm;
 
-    /* gearbox side: driven wheels' average spin through the current ratio (rad/s -> rpm) */
-    float w = 0.5f * (c->omega[2] + c->omega[3]) * dir;
-    float trans = RPM_PER_RADS * ratio * w;
+    /* gearbox side: driven wheels' average spin through the current ratio (rad/s -> rpm);
+       a charging burnout (+1244) keeps the clutch open */
+    float w = 0;
+    int nd = 0;
+    for (int i = 0; i < 4; i++)
+        if (driven_wheel(c, i))
+            w += c->omega[i], nd++;
+    w = (nd ? w / nd : 0) * dir;
+    float trans = c->burn_hold ? 0 : RPM_PER_RADS * ratio * w;
     float slip = trans < 0 ? c->rpm : c->rpm - trans;
     /* pump torque k * slip^2 (k = PumpTorqueScale / 1000), limited to MaxPumpTorque */
     float k = p->pump_torque_scale * 0.001f;
@@ -571,9 +671,11 @@ static float drivetrain(Car *c, float dt)
     /* torque multiplication: maxK at stall, 1 when the turbine catches the engine */
     float mult = (c->rpm > trans && c->rpm > 0 && trans > 0)
                  ? p->max_k + (1.0f - p->max_k) * trans / c->rpm : p->max_k;
-    float out = pump * mult;
+    float out = pump * mult * c->torque_scale; /* +232: WheelStandTorqueScale */
     if (ratio > 0 && w > 0)
         out *= c->boost; /* engine +104: the powerslide torque scale */
+    if (c->burn_hold)
+        out = 0;
 
     /* automatic gearbox (PS2 0x225540): load = converter slip between Low/HighLoadRPM; shift
        points blend Low->High; no shifting while braking or within ShiftTime of the last shift;
@@ -612,6 +714,24 @@ static float drivetrain(Car *c, float dt)
     float rpm = c->rpm;
     float gross = interp(p->rpm, p->hp, p->n_rpm, rpm) * 5252.0f / fmaxf(rpm, 1.0f) + fr * rpm * rpm;
     float te = gross * fminf(load + p->idle_throttle, 1.0f) - fr * rpm * rpm;
+
+    /* NOX (0x225810 +124..+168): the Boost action burns NOXBurnRate per second and adds
+       5252 * NOXHPBoost / rpm; an empty tank waits NOXRefreshTime, then refills at NOXRefreshRate */
+    float cap = p->nox_base * p->nox_level;
+    c->nox_on = c->nox_on && c->nox > 0;
+    if (!c->nox_on && c->nox < cap && c->nox_delay < 0)
+        c->nox += p->nox_refresh * dt;
+    c->nox = fminf(c->nox, cap);
+    if (c->nox_on && rpm > 0) {
+        te += 5252.0f * p->nox_hp / rpm;
+        c->nox -= p->nox_burn * dt;
+        if (c->nox <= 0) {
+            c->nox_on = 0;
+            c->nox_delay = p->nox_refresh_time;
+        }
+    }
+    c->nox_delay -= dt;
+
     /* engine speed, implicit in the pump torque's slope */
     float inv_i = 1.0f / p->engine_inertia;
     float denom = 1.0f + dt * k * fabsf(slip) * inv_i;
@@ -623,30 +743,111 @@ static float drivetrain(Car *c, float dt)
     return 2.0f * wheel * dir;
 }
 
-static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, float h)
+/* body inertia (x pitch, y yaw, z roll) */
+static void inertia(const CarParams *p, float I[3])
+{
+    float m = mass(p);
+    I[0] = m * (BOX[1] * BOX[1] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[0];
+    I[1] = m * (BOX[0] * BOX[0] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[1];
+    I[2] = m * (BOX[0] * BOX[0] + BOX[1] * BOX[1]) / 12 * p->inertia_scale[2];
+}
+
+/* Forces and torques of the game's driving actions, re-evaluated every substep because they
+   follow the body's attitude and spin. F, T: world space accumulators. */
+static void action_forces(Car *c, float F[3], float T[3])
+{
+    const CarParams *p = c->p;
+    const float *r = c->rot, *u = c->rot + 3, *f = c->rot + 6;
+    float m = mass(p);
+    float wl[3] = { dot3(c->angvel, r), dot3(c->angvel, u), dot3(c->angvel, f) }; /* local spin */
+    float roll = asinf(clampf(r[1], -1, 1)); /* about fwd; the game's +808 is its negative */
+    float pitch = asinf(clampf(f[1], -1, 1)); /* nose up; the game's +800 */
+    int g_all = c->grounded == 4, g_any = c->grounded > 0;
+
+    /* 0x3817c0: powerslide push, PowerslideMin..MaxBoost by the slip angle (Min..MaxAngle),
+       times mass / 10 along the car's nose */
+    if (c->ps && c->slip_angle > 0.12f) {
+        float b = lerp2(c->slip_angle, p->ps_min_angle, p->ps_min_boost, p->ps_max_angle, p->ps_max_boost);
+        madd(F, f, fminf(b, p->ps_max_boost) * m * 0.1f);
+    }
+    /* aero drag above AeroMinSpeed: rho/2 * |v|^2 * area * drag, less while boosting */
+    if (fabsf(c->fwd) > p->aero_min_speed) {
+        float d = 0.00118845f * c->spd * c->spd * p->aero_area * p->aero_drag;
+        if (c->nox_on)
+            d *= p->nox_streamlining;
+        madd(F, f, c->fwd < 0 ? d : -d);
+    }
+    /* not on all four wheels: AirborneDamping against the spin */
+    if (!g_all)
+        madd(T, c->angvel, -p->airborne_damping);
+    /* in the air, 0.5 s after a jump: stick pitch (AirborneControlMoment.x * y) and yaw
+       (8000 * x), unroll, damping, and nose levelling (0.5 s.. by the code) */
+    if (!g_any && c->jump_since > 0.5f) {
+        float tl[3];
+        tl[0] = p->air_moment[0] * c->y;
+        tl[1] = 8000.0f * c->x;
+        tl[2] = p->unroll_torque * (-p->unroll_gain * roll - wl[2]);
+        for (int k = 0; k < 3; k++)
+            tl[k] -= p->airborne_damping * wl[k];
+        if (fabsf(c->x) < 0.1f)
+            tl[1] += p->unyaw_torque * (p->unyaw_gain * c->slip_angle - wl[1]);
+        int level = fabsf(c->y) < 0.1f || fabsf(pitch) > 1.309f ||
+                    (c->vel[1] < 0 && fabsf(pitch) > 0.0872665f);
+        if (level)
+            tl[0] += lerp2(fabsf(pitch), 0, 1500, 1.309f, 3000) * (7.0f * pitch - wl[0]);
+        float tw[3];
+        dir_world(c, tl, tw);
+        madd(T, tw, 1);
+    }
+    /* 0x381fc0: the jump, MaxPreload straight up for PreloadTime */
+    if (c->jump_on)
+        F[1] += p->max_preload;
+    /* 0x382b40: wheelstand, a roll PD toward +-WheelStandAngle; on the way out half of it, the
+       other way, plus the same torque pressing the car down */
+    if (c->tilt) {
+        float target = c->tilt_side > 0 ? -p->ws_angle : p->ws_angle;
+        if (c->tilt_exit)
+            target = -target;
+        /* game: rate_gain * (roll_gain * (target - r808) - rate), r808 = -roll */
+        float tq = p->ws_roll_rate_gain * (p->ws_roll_gain * (target + roll) - wl[2]);
+        if (c->tilt_exit) {
+            tq *= 0.5f;
+            F[1] -= fabsf(tq / WX[1]);
+        }
+        madd(T, f, tq);
+    }
+    /* 0x383030: a charged burnout pushes the car forward while the gas is held */
+    if (c->burn_t > 0 && !c->burn_charge && c->gas_in >= 1.0f && g_all)
+        madd(F, f, p->burnout_thrust);
+}
+
+static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
 {
     const CarParams *p = c->p;
     float *r = c->rot, *u = c->rot + 3, *f = c->rot + 6;
     float m = mass(p);
     float F[3] = { 0, -p->weight * p->gravity_scale, 0 }, T[3] = { 0, 0, 0 };
     int grounded = 0;
-    int driven_n = p->drivetrain == 2 ? 4 : 2;
+    int driven_n = 0;
+    for (int i = 0; i < 4; i++)
+        driven_n += driven_wheel(c, i);
     for (int i = 0; i < 4; i++) {
         const TireParams *tp = &p->tire[i];
         int rear = i >= 2;
-        int driven = p->drivetrain == 2 || (p->drivetrain == 1 ? rear : !rear);
+        int driven = driven_wheel(c, i);
         float R = tp->radius;
 
         /* wheel spin (PS2 0x231e30 / 0x2326d0): drive + brake torque against the last
-           longitudinal force, over TireInertia; at most 293.3 rad/s */
-        float brake = (c->gear > 0 ? c->brake : 0);
-        if (rear && handbrake)
-            brake = 1;
+           longitudinal force, over TireInertia; at most 293.3 rad/s. The brake level (+1248)
+           goes to all four wheels; the stopped hold locks them. */
+        float brake = c->hold ? 1.0f : c->brake;
         float spin_sign = fmaxf(-1.0f, fminf(1.0f, 0.5f * c->omega[i]));
         float torque = (driven ? hub_torque / driven_n : 0) - brake * tp->max_brake_torque * spin_sign;
         c->omega[i] += (torque - c->fx_prev[i] * R) / tp->inertia * h;
         c->omega[i] = fmaxf(-293.33f, fminf(293.33f, c->omega[i]));
         c->spin[i] += c->omega[i] * h;
+        if (rear && c->burn_charge)
+            c->spin[i] += 10.0f * h; /* burnout charge: the rear wheels spin on the spot */
 
         /* suspension (PS2 0x2317b0): ray from the bind-pose wheel centre down one tyre
            radius; compression 0 at the bind pose */
@@ -719,7 +920,7 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         float fx = -(c->slip[i] > 0 ? 1.0f : -1.0f) * table(&tp->drive, c->slip[i], 1.0f) * fn;
         float load = p->weight * 0.25f + (fn - p->weight * 0.25f) * p->normal_load_scale;
         float fy = -(alpha > 0 ? 1.0f : -1.0f) * table(&tp->side, alpha * 0.99f, 1.5707963f) * load;
-        fy *= c->lat_scale[i]; /* tyre +892: powerslide / exit / handbrake scales (PS2 0x382320) */
+        fy *= c->lat_scale[i]; /* tyre +892: powerslide / exit / handbrake scales */
         c->fx_prev[i] = fx;
         float ft[3] = { 0, 0, 0 };
         madd(ft, wf, fx);
@@ -729,15 +930,13 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         madd(T, tq, 1);
     }
     c->grounded = grounded;
-    float sp = sqrtf(dot3(c->vel, c->vel));
-    madd(F, c->vel, -0.5f * RHO_AIR * p->aero_drag * p->aero_area * sp);
+    action_forces(c, F, T);
 
     madd(c->vel, F, h / m);
     madd(c->pos, c->vel, h);
     /* angular: torque to body frame, divide by inertia (x pitch, y yaw, z roll), back to world */
-    float I[3] = { m * (BOX[1] * BOX[1] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[0],
-                   m * (BOX[0] * BOX[0] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[1],
-                   m * (BOX[0] * BOX[0] + BOX[1] * BOX[1]) / 12 * p->inertia_scale[2] };
+    float I[3];
+    inertia(p, I);
     madd(c->angvel, r, dot3(T, r) / I[0] * h);
     madd(c->angvel, u, dot3(T, u) / I[1] * h);
     madd(c->angvel, f, dot3(T, f) / I[2] * h);
@@ -780,73 +979,315 @@ static float rate(float cur, float target, float per_s, float dt)
     return cur + (d > m ? m : (d < -m ? -m : d));
 }
 
+/* 0x37f6d0: actions -> stick / pedal values; d-pad steering takes over until the stick moves */
+static void read_input(Car *c, const CarInput *in)
+{
+    c->x_prev = c->x;
+    c->x = in->steer;
+    c->y = in->steer_y;
+    c->gas_in = in->throttle > 0 ? 1.0f : 0.0f; /* digital Gas (DigitalThrottleSpeed 0) */
+    c->brake_in = in->brake > 0 ? 1.0f : 0.0f;
+    c->ebrake_in = in->ebrake ? 1.0f : 0.0f;
+    /* Boost: engine +124; with NOX left it also floors the gas */
+    c->nox_on = in->boost && c->nox > 0;
+    if (c->nox_on)
+        c->gas_in = 1.0f;
+    if (in->dpad_x) {
+        c->x = (float)in->dpad_x;
+        c->digital = 1;
+    } else if (c->x != 0) {
+        c->digital = 0;
+    }
+    if (in->dpad_y)
+        c->y = (float)in->dpad_y;
+}
+
+/* 0x37fc90: steering filters and speed tables, brake ramp, stopped hold, reverse, gas ramp,
+   burnout charge */
+static void controls(Car *c, float dt)
+{
+    const CarParams *p = c->p;
+    float sp_mph = fabsf(c->fwd) * MPH, scale;
+    if (c->digital) {
+        float r = (c->x != 0 ? p->xdpad_on : p->xdpad_off) * dt;
+        c->xf += clampf(c->x - c->xf, -r, r);
+        c->yf += clampf(c->y - c->yf, -r, r);
+        scale = interp(p->dpad_speed, p->dpad_scale, 3, sp_mph);
+    } else {
+        c->x = sgnf(c->x) * powf(fabsf(c->x), p->steer_power);
+        c->xf = c->x;
+        float r = p->x_rate * dt;
+        c->yf += clampf(c->y - c->yf, -r, r);
+        scale = interp(p->steer_speed, p->steer_scale, 3, sp_mph);
+    }
+    if (c->tilt)
+        scale *= p->ws_steer_scale;
+    c->steer_cmd = scale * c->xf;
+
+    /* stopped hold: the EBrake, or the Brake before reverse is armed, at <= 3 ft/s */
+    int braking = c->ebrake_in != 0 || (c->brake_in != 0 && !c->rev_ready);
+    if (braking && c->spd <= 3.0f) {
+        /* shortcut: the game also sets engine +240 here; read as "back to first gear" (the
+           gearbox does not shift while braking), not traced into 0x225810 */
+        c->hold = 1;
+        if (c->gear > 0)
+            c->gear = 1;
+    }
+    /* brake ramp at BrakeRateLimit (+1252, level +1248 = half of it) */
+    if (braking)
+        c->brake_acc += clampf(1.0f - c->brake, -p->brake_rate * dt, p->brake_rate * dt);
+    else
+        c->brake_acc = 0;
+    c->brake = 0.5f * c->brake_acc;
+    c->burn_arm = c->brake_in != 0 && c->gas_in != 0;
+    /* reverse: once armed, the brake held for ReverseTime selects reverse and becomes the gas */
+    if ((c->brake_in != 0 || c->gas_in == 0) && c->rev_ready) {
+        if (c->rev_t <= 0) {
+            c->gear = -1;
+            c->gas_in = c->brake_in;
+        } else {
+            c->rev_t -= dt;
+        }
+    } else {
+        c->rev_t = p->reverse_time;
+        if (c->gear < 0)
+            c->gear = 1;
+    }
+    if (c->hold && ((c->gas_in > 0 && c->ebrake_in == 0) ||
+                    (c->brake_in != 0 && c->rev_ready && c->ebrake_in == 0)))
+        c->hold = 0;
+    /* gas: GasRateLimit only on the way to full throttle */
+    if (c->gas_in != 1.0f) {
+        c->gas = c->gas_in;
+        c->burn_hold = 0;
+        c->burn_charge = 0;
+        return;
+    }
+    c->gas = rate(c->gas, c->gas_in, p->gas_rate, dt);
+    /* burnout: gas and brake together, standing still, charges for BurnoutChargeTime */
+    if (c->burn_arm && fabsf(c->fwd) < 3.0f && fabsf(c->lat) < 2.0f && c->ebrake_in == 0) {
+        c->burn_hold = 1;
+        if (!c->burn_charge)
+            c->burn_t = p->burnout_charge;
+        c->burn_charge = 1;
+    } else {
+        c->burn_hold = 0;
+        if (c->burn_charge && c->burn_t < 0) {
+            c->burn_t = p->burnout_time;
+            c->burn_charge = 0;
+        }
+    }
+}
+
+/* 0x388650: stop with the brake, let go, press again: reverse */
+static void reverse_arming(Car *c)
+{
+    if (c->burn_charge)
+        return;
+    int any = c->brake_in != 0 || c->ebrake_in != 0;
+    if (any && c->hold)
+        c->rev_arm = 1;
+    if (c->rev_arm && !any && c->hold) {
+        c->rev_arm = 0;
+        c->rev_ready = 1;
+    }
+    if (c->gas_in != 0 && c->brake_in == 0)
+        c->rev_ready = c->rev_arm = 0;
+}
+
+/* 0x381fc0: pull the stick back past 0.8 (charging at PreloadChargeRate), then push it forward
+   past 0.8 within 0.2 s: MaxPreload up for PreloadTime. Needs > 30 ft/s, wheels down, no brake. */
+static void jump(Car *c, float dt)
+{
+    const CarParams *p = c->p;
+    if (c->jump_on) {
+        c->jump_t -= dt;
+        if (c->jump_t <= 0) {
+            c->jump_since = 0;
+            c->jump_on = 0;
+        }
+    } else if (c->grounded > 0 && fabsf(c->fwd) > 30.0f && c->brake_in == 0 && !c->tilt) {
+        c->jumped = 0;
+        if (!c->jump_charge) {
+            if (c->y > 0.8f) {
+                c->jump_charge = 1;
+                c->jump_t = 0;
+                c->jump_win = 0.2f;
+            }
+        } else if (c->y > 0.8f) {
+            c->jump_t += p->preload_charge * dt;
+        } else if (c->y < -0.8f) {
+            c->jump_charge = 0;
+            if (c->jump_t >= 0) { /* MinPreloadTime: the game zeroes it every frame */
+                c->jump_t = p->preload_time;
+                c->jump_on = c->jumped = 1;
+            }
+        } else {
+            c->jump_win -= dt;
+            if (c->jump_t <= p->max_preload_time || c->jump_win < 0) {
+                c->jump_charge = c->jump_on = 0;
+                c->jump_t = 0;
+            }
+        }
+    }
+    c->jump_since += dt;
+}
+
+static void set_lat(Car *c, float front, float rear)
+{
+    c->lat_scale[0] = c->lat_scale[1] = front;
+    c->lat_scale[2] = c->lat_scale[3] = rear;
+}
+
+/* 0x382320: powerslide. Held with the stick past PowerslideThreshold between Min/MaxSpeed:
+   front-wheel drive, steering scales, slide frictions, torque boost; released (or braking, too
+   slow): exit frictions for PowerslideExitTime. Under MinSpeed with gas and full lock the car
+   spins on the spot (low-speed slide, no button). */
+static void powerslide(Car *c, float dt)
+{
+    const CarParams *p = c->p;
+    if (c->ps_low && !c->tilt) {
+        if (c->fwd >= 0) {
+            c->lat_scale[0] = c->lat_scale[1] = p->ps_ls_front;
+            c->rear_cmd = -c->x;
+            c->lat_scale[2] = c->lat_scale[3] = c->gas_in != 0 ? p->ps_ls_rear : 1.0f;
+            c->yaw_limit = p->ps_yaw;
+        }
+        if (c->gas_in == 0 || c->spd > p->ps_min_speed || c->x_prev * c->x <= 0)
+            c->ps_low = c->ps = 0;
+        return;
+    }
+    if (c->ps && !c->tilt && c->rot[4] > 0) {
+        c->front_drive = 1;
+        c->steer_cmd *= p->ps_steer_scale;
+        c->rear_cmd = c->steer_cmd * p->ps_rear_steer_scale;
+        set_lat(c, p->ps_front, p->ps_rear);
+        c->yaw_limit = p->ps_hs_yaw;
+        if (c->fwd > 0 && c->slip_angle > 0.12f)
+            c->boost = 1.0f + fmaxf(0.0f, p->ps_torque + 0.5f * (c->ps_entry_speed - c->spd));
+        else
+            c->boost = 1.0f;
+        if (c->brake_in != 0 || c->spd <= p->ps_min_speed || c->ebrake_in != 0 || !c->ps_button) {
+            c->ps_exit_t = p->ps_exit_time;
+            c->yaw_limit = p->ps_exit_yaw;
+            c->ps = 0;
+            if (!c->ps_button)
+                c->ps_armed = 1;
+        }
+        return;
+    }
+    if (!c->ps_button)
+        c->ps_armed = 1;
+    if (fabsf(c->x) > p->ps_threshold && c->spd < p->ps_max_speed && c->spd > p->ps_min_speed &&
+        c->ps_button && c->ps_armed) {
+        c->ps = 1;
+        c->ps_armed = c->ps_low = 0;
+        c->ps_entry_x = c->x;
+        c->ps_entry_speed = c->spd;
+    } else if (fabsf(c->x) > p->ps_threshold && c->gas_in != 0 && c->spd < p->ps_min_speed &&
+               c->x_prev * c->x >= 0) {
+        c->ps_low = 1;
+        c->ps = 0;
+    }
+    c->rear_cmd = 0;
+    if (c->ps_exit_t <= 0) {
+        set_lat(c, 1, 1);
+        c->yaw_limit = p->yaw_rate_limit;
+        c->boost = 1.0f;
+        c->front_drive = 0;
+    } else {
+        c->ps_exit_t -= dt;
+        c->yaw_limit = p->ps_exit_yaw;
+        set_lat(c, p->ps_front_exit, p->ps_rear_exit);
+    }
+}
+
+/* 0x382a00: EBrake. Started moving forward (or kept), front grip 1, rear HandBrakeFrictionScale
+   until the car has turned 270 degrees. */
+static void handbrake(Car *c, float dt)
+{
+    if (c->ebrake_in != 0) {
+        if ((c->fwd > 0 && !c->hold) || c->hb_on) {
+            c->lat_scale[0] = c->lat_scale[1] = 1.0f;
+            if (fabsf(c->hb_yaw) < 4.71239f)
+                c->lat_scale[2] = c->lat_scale[3] = c->p->handbrake_scale;
+            c->hb_on = 1;
+            c->hb_yaw += dt * dot3(c->angvel, c->rot + 3);
+        }
+    } else {
+        c->hb_on = 0;
+        c->hb_yaw = 0;
+    }
+}
+
+/* 0x382b40: Tilt. On four wheels above 30 ft/s, no brake, stick past 0.3: up on two wheels on
+   the stick's side (torque in action_forces), the engine at WheelStandTorqueScale. Letting go,
+   slowing down or leaving the ground starts the way down (1 s at most). */
+static void tilt(Car *c, int button, float dt)
+{
+    const CarParams *p = c->p;
+    c->tilt_start = 0;
+    if (c->tilt) {
+        if (c->fwd < 30.0f || !button || c->grounded == 0) {
+            if (!c->tilt_exit) {
+                c->tilt_exit = 1;
+                c->tilt_t = 1.0f;
+            }
+        }
+        if (c->tilt_exit && (c->grounded == 4 || c->rot[4] >= 0.99f || c->tilt_t < 0)) {
+            c->tilt = c->tilt_exit = 0;
+            madd(c->angvel, c->rot + 6, -dot3(c->angvel, c->rot + 6)); /* roll rate zeroed */
+            c->torque_scale = 1.0f;
+        }
+    } else if (c->grounded == 4 && c->fwd > 30.0f && c->brake_in == 0 && button && fabsf(c->x) > 0.3f) {
+        c->tilt = c->tilt_start = 1;
+        c->tilt_exit = 0;
+        c->torque_scale = p->ws_torque_scale;
+        c->tilt_side = c->x < 0 ? 1.0f : -1.0f;
+    }
+    c->tilt_t -= dt;
+}
+
 void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
 {
     const CarParams *p = c->p;
     if (dt > 0.1f)
         dt = 0.1f;
-    float speed = car_speed(c);
-    /* reverse: brake held while (nearly) stopped engages reverse; gas engages drive */
-    if (c->gear > 0 && in->brake > 0 && speed < 1.0f && in->throttle <= 0)
-        c->gear = -1;
-    else if (c->gear < 0 && (in->throttle > 0 || (in->brake <= 0 && speed > -1.0f)))
-        c->gear = 1;
-    c->gas = rate(c->gas, in->throttle, p->gas_rate, dt);
-    c->brake = rate(c->brake, in->brake, p->brake_rate, dt);
-    /* steering: input curve, rate limit, speed table (mph), max wheel angle */
-    float x = in->steer;
-    float shaped = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p->steer_power);
-    c->steer_in = rate(c->steer_in, shaped, p->x_rate, dt);
-    float scale = interp(p->steer_speed, p->steer_scale, 3, fabsf(speed) * MPH);
-    if (speed < -1.0f)
-        scale *= p->reverse_steer;
-    c->steer = c->steer_in * scale * p->tire[0].max_steer * 3.14159265f / 180.0f;
-    /* powerslide state machine (PS2 0x382320): enter while the Powerslide action is held with
-       the stick past PowerslideThreshold between Min/MaxSpeed; exit phase on release.
-       shortcut: the reverse/low-speed variants and the Min/MaxAngle rear friction blend are not
-       ported; add them if sliding at low speed feels off. */
-    float shaped_x = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p->steer_power);
-    if (c->ps == 0 && in->powerslide && fabsf(shaped_x) > p->ps_threshold &&
-        speed > p->ps_min_speed && speed < p->ps_max_speed) {
-        c->ps = 1;
-        c->ps_entry_speed = speed;
-    } else if (c->ps == 1 && (!in->powerslide || speed <= p->ps_min_speed)) {
-        c->ps = 2;
-        c->ps_timer = p->ps_exit_time;
-    } else if (c->ps == 2 && (c->ps_timer -= dt) <= 0) {
-        c->ps = 0;
-    }
-    for (int i = 0; i < 4; i++)
-        c->lat_scale[i] = 1.0f;
-    c->yaw_limit = p->yaw_rate_limit;
-    c->boost = 1.0f;
-    c->rear_steer = 0;
-    if (c->ps == 1) {
-        c->steer *= p->ps_steer_scale;
-        c->rear_steer = c->steer * p->ps_rear_steer_scale;
-        c->lat_scale[0] = c->lat_scale[1] = p->ps_front;
-        c->lat_scale[2] = c->lat_scale[3] = p->ps_rear;
-        c->yaw_limit = p->ps_hs_yaw;
-        c->boost = 1.0f + fmaxf(0.0f, p->ps_torque + 0.5f * (c->ps_entry_speed - speed));
-    } else if (c->ps == 2) {
-        c->lat_scale[0] = c->lat_scale[1] = p->ps_front_exit;
-        c->lat_scale[2] = c->lat_scale[3] = p->ps_rear_exit;
-        c->yaw_limit = p->ps_exit_yaw;
-    } else if (in->handbrake) {
-        /* handbrake (0x382a00): rear grip scaled until the car has turned 270 degrees */
-        c->hb_yaw += dot3(c->angvel, c->rot + 3) * dt;
-        if (fabsf(c->hb_yaw) < 4.712f)
-            c->lat_scale[2] = c->lat_scale[3] = p->handbrake_scale;
-    }
-    if (!in->handbrake)
-        c->hb_yaw = 0;
+    /* the body's speeds as the game measures them */
+    c->fwd = car_speed(c);
+    c->lat = dot3(c->vel, c->rot);
+    c->spd = sqrtf(dot3(c->vel, c->vel));
+    c->slip_angle = c->spd > 1.0f ? atan2f(fabsf(c->lat), fabsf(c->fwd)) : 0.0f;
+
+    read_input(c, in);
+    c->ps_button = in->powerslide;
+    controls(c, dt);
+    reverse_arming(c);
+    jump(c, dt);
+    powerslide(c, dt);
+    handbrake(c, dt);
+    tilt(c, in->tilt, dt);
+    /* 0x383030: burnout timers (charge, then thrust while the gas is held) */
+    if (c->burn_t > 0 && !c->burn_charge)
+        c->burn_t -= dt;
+    else if (c->burn_charge)
+        c->burn_t -= dt;
+
+    /* wheel angles: front by MaxSteerAngle, rear by PowerslideLowSpeedRearSteerAngle (the PS2
+       loader gives the rear tyres that max angle); ReverseSteerScale backing up */
+    float front = c->steer_cmd * p->tire[0].max_steer * DEG;
+    if (c->fwd < -1.0f)
+        front *= p->reverse_steer;
+    c->steer = front;
+    c->rear_steer = c->rear_cmd * p->ps_ls_rear_steer;
+
     float hub = drivetrain(c, dt);
     c->drive_slip = c->side_slip = c->strut_hit = c->impact = 0;
     int n = (int)ceilf(dt * 240.0f);
     if (n < 1) n = 1;
     if (n > 24) n = 24;
     for (int i = 0; i < n; i++)
-        substep(c, w, hub, in->handbrake, dt / n);
+        substep(c, w, hub, dt / n);
 }
 
 void car_matrix(const Car *c, float out[16])

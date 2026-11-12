@@ -85,18 +85,23 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 
 ### Escenario (SELECT) — conducir a McQueen
 
-Controles del preset 1 del juego (acelerar A, frenar X, freno de mano Y, powerslide RT).
+Controles del **preset 1 de PS2** (`UI\controller_presets_ps2.txt` del disco). La Vita no tiene
+L2/R2: R1→R, L1→L y R2 (Turbo) pasa al panel táctil trasero.
 
-| Botón | Acción |
+| Botón | Acción del juego |
 |---|---|
+| Stick izquierdo / cruceta ←→ | Girar (la cruceta usa sus propias tablas `DPadSteer*`) |
 | ✕ | Acelerar |
-| □ / L | Frenar; parado, marcha atrás |
-| Stick izquierdo | Girar |
-| △ | Freno de mano |
-| R (mantener) | Powerslide (derrape controlado, con el volante a fondo) |
-| Cruceta ↓ | Recolocar el coche (derecho, en el sitio) |
-| ○ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
-| Cruceta → | Siguiente canción |
+| □ | Frenar. Parado: suelta y vuelve a pulsar para marcha atrás |
+| ○ | Freno de mano (EBrake) |
+| R (mantener) | Powerslide, con el stick a fondo y a más de 23 mph |
+| L (mantener) + stick | Inclinar: conducir sobre dos ruedas (a más de 20 mph) |
+| Panel trasero (mantener) | Turbo (NOX: 1,65 s, se recarga solo) |
+| Stick (o cruceta) atrás y luego adelante | Saltar (a más de 20 mph, sin freno) |
+| ✕ + □ parado, soltar □ | Burnout (salida con empuje) |
+| ✕ + stick a fondo despacio | Donut (derrape a baja velocidad, sin botón) |
+| SELECT | Recolocar el coche |
+| △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario, → siguiente canción) |
 
 La física (`src/car.c`) usa los parámetros del propio juego, `mcq.phy` (lo copia
 `vitaconv.py char`): peso, centro de gravedad, inercia, suspensión y radio por rueda,
@@ -106,6 +111,20 @@ automáticos, frenos, aerodinámica, curva de dirección por velocidad y cámara
 Al conducir, la carrocería se inclina como en el juego: mezcla las animaciones
 `bef_lean_*` (lateral según el volante; adelante/atrás según acelerador y freno; juego
 lento o rápido entre 30 y 100 mph), con la lógica descifrada del ELF de PS2.
+
+Las acciones de conducción siguen las funciones del vehículo del ELF de PS2 (tabla de
+métodos en 0x4da2a0): controles 0x37fc90 (filtros de dirección, rampa de freno, retención
+parado, marcha atrás, rampa de gas, carga de burnout), salto 0x381fc0 (`[Preload]`),
+powerslide 0x382320 (tracción delantera durante el derrape, donut a baja velocidad),
+freno de mano 0x382a00, inclinar 0x382b40 (`[Wheelstand]`), burnout 0x383030, control en el
+aire y empuje del powerslide 0x3817c0 (`[Aerodynamics]`) y el NOX del motor 0x225810.
+Sonidos: `Whl_Stnd`/`whl_down` al inclinar y `NOS_Boost` del turbo; caras: `MCQ_EF_Boost`,
+`MCQ_EF_DonutsL/R` y golpes `MCQ_EF_MinHit*/MaxHit*`. Para tenerlas, convierte con:
+
+```bash
+python tools/vitaconv.py char McQ extracted/vita/mcq bef_kch bef_won bef_breath bef_ow bef_lost beft_1_6a. beft_idle bef_lean e_eyes mcq_ef_boost mcq_ef_donuts mcq_ef_minhit mcq_ef_maxhit mcq_ef_cool
+python tools/vitaaudio.py extracted/vita/audio
+```
 
 Si la pantalla se queda roja, no encuentra `ux0:data/pixcars/mcq/model.vcm`.
 

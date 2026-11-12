@@ -33,6 +33,7 @@
 
 #include <psp2/audioout.h>
 #include <psp2/ctrl.h>
+#include <psp2/touch.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
@@ -111,6 +112,10 @@ static ColWorld g_col;
 static Car g_car;
 static CarParams g_params;     /* from ux0:data/pixcars/<char>/<char>.phy (McQueen's if absent) */
 static int g_idle[8], g_n_idle; /* <char>_beft_idle* animations, played when parked */
+/* face/eye overlays of the driving actions (MCQ_EX_PL.mcf): boost, donuts (low-speed slide,
+   left/right), minor and major hits */
+static int g_ef_boost = -1, g_ef_donut[2] = { -1, -1 }, g_ef_minhit[3] = { -1, -1, -1 },
+           g_ef_maxhit[3] = { -1, -1, -1 };
 /* lean pose strips (PS2 slots 7-12): base, back (accelerating), forward (braking), slow/fast */
 static const char *LEAN_NAMES[6] = { "_bef_lean_slow", "_bef_lean_fast", "_bef_lean_bck_slow",
                                      "_bef_lean_bck_fast", "_bef_lean_fwd_slow", "_bef_lean_fwd_fast" };
@@ -274,6 +279,18 @@ static int load_character(const char *code)
         }
         if (strstr(g_anims[i].name, "_beft_idle") && g_n_idle < 8)
             g_idle[g_n_idle++] = i;
+        const char *nm = g_anims[i].name;
+        size_t nl = strlen(nm);
+        if (strstr(nm, "_ef_boost"))
+            g_ef_boost = i;
+        if (strstr(nm, "_ef_donutsl"))
+            g_ef_donut[0] = i;
+        if (strstr(nm, "_ef_donutsr"))
+            g_ef_donut[1] = i;
+        if (nl && strstr(nm, "_ef_minhit") && nm[nl - 1] >= '1' && nm[nl - 1] <= '3')
+            g_ef_minhit[nm[nl - 1] - '1'] = i;
+        if (nl && strstr(nm, "_ef_maxhit") && nm[nl - 1] >= '1' && nm[nl - 1] <= '3')
+            g_ef_maxhit[nm[nl - 1] - '1'] = i;
     }
     return 0;
 }
@@ -571,8 +588,8 @@ static int lean_pose(Lean *ln, const CarInput *in, float speed, float dt,
     for (int k = 0; k < 6; k++)
         if (g_lean[k] < 0)
             return 0;
-    float x = in->steer, p = g_params.steer_power;
-    float shaped = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p);
+    /* the controls' shaped, filtered steering (+1640), so the d-pad leans the body too */
+    float shaped = g_car.xf;
     float d = (in->throttle - in->brake) - ln->axis, r = g_params.x_rate * dt;
     ln->axis += d > r ? r : (d < -r ? -r : d);
     ln->lat_t = lean_filter(ln->lat_t, (1.0f + shaped) * 0.5f, dt);
@@ -652,7 +669,11 @@ static void pose_car(const Car *c, const VcaAnim *const *anims, const float *wei
 }
 
 /* Driving sounds from the fx.aud parameters (exported to sfx/sfx.txt). */
-typedef struct { int burn, slide; float burn_lv, slide_lv, sus_cool, imp_cool; int brake_armed; } DriveSfx;
+typedef struct {
+    int burn, slide;
+    float burn_lv, slide_lv, sus_cool, imp_cool;
+    int brake_armed, nox_was, tilt_exit_was;
+} DriveSfx;
 
 static float sfx_loop(int voice, int id, int on, float slip, float *level, float dt)
 {
@@ -669,24 +690,43 @@ static float sfx_loop(int voice, int id, int on, float slip, float *level, float
     return *level;
 }
 
-static void drive_sounds(DriveSfx *d, const Car *c, const CarInput *in, float dt)
+static void play_sfx(const char *name, float vol)
+{
+    int id = audio_sfx(&g_audio, name, 0);
+    if (id >= 0)
+        audio_play(&g_audio, id, vol, 1, 0);
+}
+
+static void drive_sounds(DriveSfx *d, const Car *c, float dt)
 {
     int burn = audio_sfx(&g_audio, "burnout", 0), slide = audio_sfx(&g_audio, "powerslide", 0);
     if (burn >= 0 && d->burn < 0)
         d->burn = audio_play(&g_audio, burn, 0, 1, 1);
     if (slide >= 0 && d->slide < 0)
         d->slide = audio_play(&g_audio, slide, 0, 1, 1);
+    /* [<char>Burnout]: spinning driven wheels, or the burnout charge on the spot */
+    float bslip = c->burn_charge ? 1.0f : c->drive_slip;
     if (burn >= 0)
-        sfx_loop(d->burn, burn, in->throttle > 0 && c->grounded && c->drive_slip > 0.05f, c->drive_slip, &d->burn_lv, dt);
+        sfx_loop(d->burn, burn, c->gas > 0 && c->grounded && bslip > 0.05f, bslip, &d->burn_lv, dt);
     if (slide >= 0)
-        sfx_loop(d->slide, slide, c->ps == 1 && c->grounded, c->side_slip, &d->slide_lv, dt);
+        sfx_loop(d->slide, slide, (c->ps || c->ps_low) && c->grounded, c->side_slip, &d->slide_lv, dt);
     float speed = fabsf(car_speed(c));
-    if (in->brake > 0 && speed > 30.0f && c->gear > 0 && d->brake_armed) {
-        audio_play(&g_audio, audio_sfx(&g_audio, "brake", 0), 1, 1, 0);
+    if (c->brake_in > 0 && speed > 30.0f && c->gear > 0 && d->brake_armed) {
+        play_sfx("brake", 1);
         d->brake_armed = 0;
     }
-    if (in->brake <= 0)
+    if (c->brake_in <= 0)
         d->brake_armed = 1;
+    /* NOX: carengine.aud [<Char>BoostSound] when the boost kicks in */
+    if (c->nox_on && !d->nox_was)
+        play_sfx("boost", 1);
+    d->nox_was = c->nox_on;
+    /* Tilt: [<char>WheelStand] FileNameUp going up, FileNameDown on the way down */
+    if (c->tilt_start)
+        play_sfx("wheelstand_up", 1);
+    if (c->tilt_exit && !d->tilt_exit_was)
+        play_sfx("wheelstand_down", 1);
+    d->tilt_exit_was = c->tilt_exit;
     /* suspension: the highest velocity tier reached, attenuation by Min/MaxLevelVelocity */
     d->sus_cool -= dt;
     int sus = -1;
@@ -707,6 +747,41 @@ static void drive_sounds(DriveSfx *d, const Car *c, const CarInput *in, float dt
     if (c->impact > 5.0f && d->imp_cool <= 0) {
         audio_play(&g_audio, audio_sfx(&g_audio, "impact", rand() % 3), fminf(1.0f, c->impact / 40.0f), 1, 0);
         d->imp_cool = 0.3f;
+    }
+}
+
+/* Face/eye overlay: one EF motion at a time, over the lean and eye strips (it only has
+   face and eye tracks, so a large weight makes it win there and leaves the body alone). */
+typedef struct { int anim; float t; int loop; } Overlay;
+
+static void overlay_play(Overlay *o, int anim, int loop)
+{
+    if (anim < 0 || (o->anim == anim && loop))
+        return;
+    o->anim = anim;
+    o->t = 0;
+    o->loop = loop;
+}
+
+static void drive_overlay(Overlay *o, const Car *c, float dt)
+{
+    static int nox_was;
+    if (c->nox_on && !nox_was)
+        overlay_play(o, g_ef_boost, 0);
+    nox_was = c->nox_on;
+    if (c->ps_low)
+        overlay_play(o, g_ef_donut[c->x < 0 ? 0 : 1], 1);
+    else if (o->loop)
+        o->anim = -1;
+    /* shortcut: hit strength split at 20 ft/s by eye, not from the ELF */
+    if (c->impact > 5.0f && (o->anim < 0 || o->loop)) {
+        int k = rand() % 3;
+        overlay_play(o, c->impact > 20.0f ? g_ef_maxhit[k] : g_ef_minhit[k], 0);
+    }
+    if (o->anim >= 0) {
+        o->t += dt;
+        if (!o->loop && o->t >= vca_duration(&g_anims[o->anim].anim))
+            o->anim = -1;
     }
 }
 
@@ -880,6 +955,7 @@ int main(void)
     vglInitWithCustomThreshold(0x800000, 960, 544, 0x1000000, 0x2000000, 0x1000000, 0, SCE_GXM_MULTISAMPLE_NONE);
     vglWaitVblankStart(GL_TRUE);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
     {
         FILE *f = fopen("ux0:data/pixcars/log.txt", "w"); /* fresh log each run */
@@ -957,7 +1033,8 @@ int main(void)
     float chase[3] = { 0, 0, 0 };
     int chase_init = 0, idle_anim = -1;
     Lean lean = { 0.5f, 0.5f, 0.5f, 0.5f, 0.0f };
-    DriveSfx dsfx = { -1, -1, 0, 0, 0, 0, 1 };
+    DriveSfx dsfx = { -1, -1, 0, 0, 0, 0, 1, 0, 0 };
+    Overlay ov = { -1, 0, 0 };
     float parked_t = 0, idle_t = 0;
     uint32_t prev_buttons = 0;
     SceUInt64 last = sceKernelGetProcessTimeWide();
@@ -990,7 +1067,8 @@ int main(void)
         float dt = (float)(now - last) / 1000000.0f;
         last = now;
 
-        if ((pressed & SCE_CTRL_SELECT) && g_n_scenes && have_char) {
+        int drive_now = mode == 1 && driving && g_scene_loaded;
+        if ((pressed & SCE_CTRL_SELECT) && g_n_scenes && have_char && !drive_now) {
             if (!g_scene_loaded && load_scene(g_scene_cur) == 0) {
                 memcpy(cam, g_scene.start, sizeof cam);
                 cyaw = atan2f(g_scene.start_dir[0], g_scene.start_dir[2]);
@@ -1002,31 +1080,43 @@ int main(void)
             plog("mode -> %s", mode ? "scene" : "character");
         }
 
-        if (mode == 1 && have_char && (pressed & SCE_CTRL_CIRCLE)) {
+        /* Triangle (the game's Camera Preset): chase camera <-> free camera */
+        if (mode == 1 && have_char && (pressed & SCE_CTRL_TRIANGLE)) {
             driving = !driving;
             chase_init = 0;
         }
         if (mode == 1 && driving && g_scene_loaded) {
-            int lx = (int)pad.lx - 128;
+            /* the game's PS2 preset 1 (UI\controller_presets_ps2.txt) on the Vita: Steer stick /
+               d-pad, Gas X, Brake Square, EBrake Circle, Powerslide R1 -> R, Tilt L1 -> L,
+               Boost R2 -> rear touchpad, Jump stick / d-pad back then forward, Reset To Track
+               Select, Camera Preset Triangle */
+            int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
+            SceTouchData back;
+            int touch = sceTouchPeek(SCE_TOUCH_PORT_BACK, &back, 1) >= 0 && back.reportNum > 0;
             CarInput in = { 0 };
             in.throttle = (pad.buttons & SCE_CTRL_CROSS) ? 1.0f : 0.0f;
-            in.brake = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) ? 1.0f : 0.0f;
+            in.brake = (pad.buttons & SCE_CTRL_SQUARE) ? 1.0f : 0.0f;
             in.steer = abs(lx) > 16 ? lx / 128.0f : 0.0f;
-            in.handbrake = (pad.buttons & SCE_CTRL_TRIANGLE) != 0;
+            in.steer_y = abs(ly) > 16 ? ly / 128.0f : 0.0f;
+            in.dpad_x = (pad.buttons & SCE_CTRL_RIGHT) ? 1 : ((pad.buttons & SCE_CTRL_LEFT) ? -1 : 0);
+            in.dpad_y = (pad.buttons & SCE_CTRL_UP) ? -1 : ((pad.buttons & SCE_CTRL_DOWN) ? 1 : 0);
+            in.ebrake = (pad.buttons & SCE_CTRL_CIRCLE) != 0;
             in.powerslide = (pad.buttons & SCE_CTRL_RTRIGGER) != 0;
-            if (pressed & SCE_CTRL_DOWN) {
+            in.tilt = (pad.buttons & SCE_CTRL_LTRIGGER) != 0;
+            in.boost = touch;
+            if (pressed & SCE_CTRL_SELECT) {
                 float yaw_now = atan2f(g_car.rot[6], g_car.rot[8]);
                 car_spawn(&g_car, &g_params, &g_col, g_car.pos, yaw_now);
             }
             car_step(&g_car, &g_col, &in, dt);
             g_audio.rpm = audio_speed_to_rpm(&g_audio, fabsf(car_speed(&g_car)) * 0.681818f);
             g_audio.engine_vol = 0.8f;
-            if (pressed & SCE_CTRL_RIGHT)
-                g_audio_next = 1;
-            drive_sounds(&dsfx, &g_car, &in, dt);
+            drive_sounds(&dsfx, &g_car, dt);
+            drive_overlay(&ov, &g_car, dt);
 
             /* parked with no input: play one of the game's idle animations, then wait again */
-            int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || fabsf(car_speed(&g_car)) > 0.5f;
+            int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || in.steer_y != 0 || in.dpad_x ||
+                         in.dpad_y || in.ebrake || in.boost || in.tilt || fabsf(car_speed(&g_car)) > 0.5f;
             parked_t = active ? 0 : parked_t + dt;
             if (active)
                 idle_anim = -1;
@@ -1062,13 +1152,19 @@ int main(void)
             memcpy(cam, chase, sizeof cam);
             cyaw = atan2f(look[0], look[2]);
             cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
-            const VcaAnim *pa[6];
-            float pw[6], pt[6];
+            const VcaAnim *pa[7];
+            float pw[7], pt[7];
             int pn;
             if (ia) {
                 pa[0] = ia; pw[0] = 1; pt[0] = idle_t; pn = 1;
             } else {
                 pn = lean_pose(&lean, &in, car_speed(&g_car), dt, pa, pw, pt);
+            }
+            if (ov.anim >= 0) {
+                pa[pn] = &g_anims[ov.anim].anim;
+                pw[pn] = 1000.0f;
+                pt[pn] = ov.loop ? ov.t : fminf(ov.t, vca_duration(pa[pn]) * 0.999f);
+                pn++;
             }
             pose_car(&g_car, pa, pw, pt, pn);
         }
@@ -1104,6 +1200,8 @@ int main(void)
                 cam[1] += speed * 0.5f * dt;
             if (pad.buttons & SCE_CTRL_DOWN)
                 cam[1] -= speed * 0.5f * dt;
+            if (pressed & SCE_CTRL_RIGHT)
+                g_audio_next = 1;
             if (g_n_scenes > 1 && (pressed & SCE_CTRL_LTRIGGER)) {
                 g_scene_cur = (g_scene_cur + 1) % g_n_scenes;
                 if (load_scene(g_scene_cur) == 0) {

@@ -102,6 +102,11 @@ def main():
              f"0 0 {sus['minlevelattenuation']} {sus['maxlevelattenuation']} {sus['minlevelvelocity']}")
     for i in (1, 2, 3):
         take("impact", f"SFX\\Impact\\imp_veh_hard_0{i}")
+    # [<char>WheelStand] FileNameUp / FileNameDown (Tilt) and carengine.aud [<Char>BoostSound]
+    ws = fx[f"{char.lower()}wheelstand"]
+    take("wheelstand_up", ws["filenameup"])
+    take("wheelstand_down", ws["filenamedown"])
+    take("boost", secs[f"{char.lower()}boostsound"]["filename"])
     # front end: the UIResponseEmitter bank (sfx/ui_fe.aud) and the drive-in's crickets loop
     # (scenes/fe/fe.aud [SoultreeSound1]); named after their files, e.g. fe_select_continue
     ui = ini_sections(idx.read(BS.join(["data", "audio", "sfx", "ui_fe.aud"])).decode("latin-1"))["uiresponseemitter"]
