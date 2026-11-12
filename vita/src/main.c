@@ -736,8 +736,8 @@ static void play_movie(const char *name)
 int main(void)
 {
     /* vglInit grabs all free CDRAM and phycont memory; SceAvPlayer needs both (decoder in
-       phycont, output frames in CDRAM), so leave 16 MB of each outside vitaGL's pools */
-    vglInitWithCustomThreshold(0x800000, 960, 544, 0x1000000, 0x1000000, 0x1000000, 0, SCE_GXM_MULTISAMPLE_NONE);
+       phycont, output frames in CDRAM), so leave 32 MB CDRAM (the decoder alone wants 14 MB, 1 MiB aligned) and 16 MB phycont outside vitaGL's pools */
+    vglInitWithCustomThreshold(0x800000, 960, 544, 0x1000000, 0x2000000, 0x1000000, 0, SCE_GXM_MULTISAMPLE_NONE);
     vglWaitVblankStart(GL_TRUE);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 

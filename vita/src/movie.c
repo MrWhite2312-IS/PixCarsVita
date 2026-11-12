@@ -53,21 +53,45 @@ static void mem_free(void *p, void *ptr)
 }
 
 /* video frames must be GPU-mapped: CDRAM blocks (256 KiB granularity) mapped for GXM */
+/* video frames and decoder buffers must be GPU-mapped CDRAM; the player asks for its own
+   alignment (1 MiB for the decoder block), which a plain 256 KiB memblock does not meet */
+#define MAX_BLOCKS 8
+static void *g_blocks[MAX_BLOCKS];
+
+static void free_block(int i)
+{
+    sceGxmUnmapMemory(g_blocks[i]);
+    sceKernelFreeMemBlock(sceKernelFindMemBlockByAddr(g_blocks[i], 0));
+    g_blocks[i] = NULL;
+}
+
 static void *gpu_alloc(void *p, uint32_t align, uint32_t size)
 {
     (void)p;
-    (void)align;
-    size = (size + 0x3FFFF) & ~0x3FFFFu;
-    SceUID uid = sceKernelAllocMemBlock("pixcars_video", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
+    if (align < 0x40000)
+        align = 0x40000;
+    size = (size + align - 1) & ~(align - 1);
+    SceKernelAllocMemBlockOpt opt;
+    memset(&opt, 0, sizeof opt);
+    opt.size = sizeof opt;
+    opt.attr = 4; /* SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT */
+    opt.alignment = align;
+    SceUID uid = sceKernelAllocMemBlock("pixcars_video", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, &opt);
     trace(" tex(a%x,%x)", align, size);
-    if (uid < 0) {
+    int slot = 0;
+    while (slot < MAX_BLOCKS && g_blocks[slot])
+        slot++;
+    if (uid < 0 || slot == MAX_BLOCKS) {
         trace("=FAIL%x%.0d", uid, 0);
+        if (uid >= 0)
+            sceKernelFreeMemBlock(uid);
         g_alloc_fail++;
         return NULL;
     }
     void *addr = NULL;
     sceKernelGetMemBlockBase(uid, &addr);
     sceGxmMapMemory(addr, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
+    g_blocks[slot] = addr;
     return addr;
 }
 
@@ -76,8 +100,9 @@ static void gpu_free(void *p, void *ptr)
     (void)p;
     trace(" texfree%.0d%.0d", 0, 0);
     glFinish(); /* the GPU may still be sampling the frame */
-    sceGxmUnmapMemory(ptr);
-    sceKernelFreeMemBlock(sceKernelFindMemBlockByAddr(ptr, 0));
+    for (int i = 0; i < MAX_BLOCKS; i++)
+        if (g_blocks[i] == ptr)
+            free_block(i);
 }
 
 static int audio_thread(SceSize args, void *argp)
@@ -213,5 +238,10 @@ void movie_stop(void)
         sceAvPlayerStop(g_player);
         sceAvPlayerClose(g_player);
         g_player = 0;
+        /* the player does not hand back every block on close: free what is left */
+        glFinish();
+        for (int i = 0; i < MAX_BLOCKS; i++)
+            if (g_blocks[i])
+                free_block(i);
     }
 }
