@@ -31,6 +31,19 @@ McQueen (los 6 bucles y el perfil `[Mcq]` de `carengine.aud`: volumen y tono por
 RPM salen de la velocidad por los tramos de `mcqengineaudio.ini`). Los `.wav` del juego son
 IMA ADPCM sin cabeceras de bloque; la Vita los decodifica al vuelo.
 
+### Vídeos (logos y cinemáticas)
+
+Necesita ffmpeg con los decodificadores Bink (p. ej. la compilación de BtbN):
+
+```bash
+FFMPEG=/ruta/a/ffmpeg python tools/vitamovies.py extracted/vita/movies
+```
+
+Copia `extracted/vita/movies/` a `ux0:data/pixcars/movies/`. Los `.bik` de 512×512 se
+mostraban estirados a 4:3; se restaura 4:3 y se recorta el centro a 16:9 (960×544), H.264
+para el decodificador por hardware. Al arrancar suenan los logos del juego en su orden
+original (BVG, THQ, Rainbow, Pixar); ✕ o START los saltan.
+
 ## 3. Compilar
 
 Requiere [VitaSDK](https://vitasdk.org) con vitaGL instalado (`vdpm vitaGL`).

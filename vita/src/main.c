@@ -42,6 +42,7 @@
 #include "scene.h"
 #include "car.h"
 #include "audio.h"
+#include "movie.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -708,6 +709,26 @@ static void stop_drive_sounds(DriveSfx *d)
     d->burn_lv = d->slide_lv = 0;
 }
 
+/* Play one of the game's videos full-screen; Cross or Start skips it. */
+static void play_movie(const char *name)
+{
+    char path[256];
+    snprintf(path, sizeof path, DATA_ROOT "movies/%s.mp4", name);
+    if (movie_start(path))
+        return;
+    plog("movie %s", name);
+    uint32_t prev = ~0u;
+    while (movie_draw()) {
+        vglSwapBuffers(GL_FALSE);
+        SceCtrlData pad;
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+        if ((pad.buttons & ~prev) & (SCE_CTRL_CROSS | SCE_CTRL_START))
+            break;
+        prev = pad.buttons;
+    }
+    movie_stop();
+}
+
 /* ------------------------------------------------------------------ main */
 int main(void)
 {
@@ -721,6 +742,10 @@ int main(void)
             fclose(f);
     }
     plog("start");
+    /* the game's VideoLogos sequence (PS2 ELF table: BVGLogo, THQLogo, Rainbow, PixLogo) */
+    static const char *LOGOS[] = { "bvglogo", "thqlogo", "rainbow", "pixlogo" };
+    for (int i = 0; i < 4; i++)
+        play_movie(LOGOS[i]);
     int have_char = load_character("mcq") == 0;
     plog("character: %s", have_char ? "ok" : "missing");
     if (audio_init(&g_audio, DATA_ROOT "audio/") > 0) {
