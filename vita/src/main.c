@@ -728,6 +728,7 @@ static void play_movie(const char *name)
         prev = pad.buttons;
     }
     plog("movie %s: %d frames shown, %d frame allocs failed", name, movie_frames(), movie_alloc_failures());
+    plog("movie %s trace:%s", name, movie_trace());
     movie_stop();
 }
 

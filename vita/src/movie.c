@@ -21,11 +21,29 @@ static GLuint g_tex;
 static volatile int g_audio_on;
 static SceUID g_audio_thread = -1;
 static int g_have_frame, g_frames, g_waits, g_alloc_fail;
+/* shortcut: debug trace appended from the player's threads without a lock; drop once videos work */
+static char g_trace[2048];
+static void trace(const char *fmt, int a, int b)
+{
+    size_t n = strlen(g_trace);
+    if (n < sizeof g_trace - 64)
+        snprintf(g_trace + n, sizeof g_trace - n, fmt, a, b);
+}
+
+static void on_event(void *p, int32_t id, int32_t src, void *data)
+{
+    (void)p;
+    (void)data;
+    trace(" ev%d/%d", id, src);
+}
 
 static void *mem_alloc(void *p, uint32_t align, uint32_t size)
 {
     (void)p;
-    return memalign(align, size);
+    void *r = memalign(align, size);
+    if (!r)
+        trace(" malloc(%x)=FAIL%.0d", size, 0);
+    return r;
 }
 
 static void mem_free(void *p, void *ptr)
@@ -41,7 +59,9 @@ static void *gpu_alloc(void *p, uint32_t align, uint32_t size)
     (void)align;
     size = (size + 0x3FFFF) & ~0x3FFFFu;
     SceUID uid = sceKernelAllocMemBlock("pixcars_video", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
+    trace(" tex(a%x,%x)", align, size);
     if (uid < 0) {
+        trace("=FAIL%x%.0d", uid, 0);
         g_alloc_fail++;
         return NULL;
     }
@@ -54,6 +74,7 @@ static void *gpu_alloc(void *p, uint32_t align, uint32_t size)
 static void gpu_free(void *p, void *ptr)
 {
     (void)p;
+    trace(" texfree%.0d%.0d", 0, 0);
     glFinish(); /* the GPU may still be sampling the frame */
     sceGxmUnmapMemory(ptr);
     sceKernelFreeMemBlock(sceKernelFindMemBlockByAddr(ptr, 0));
@@ -100,10 +121,12 @@ int movie_start(const char *path)
     init.basePriority = 0xA0;
     init.numOutputVideoFrameBuffers = 2;
     init.autoStart = 1;
+    init.eventReplacement.eventCallback = on_event;
+    g_trace[0] = 0;
     g_player = sceAvPlayerInit(&init);
     if (!g_player)
         return -2;
-    sceAvPlayerAddSource(g_player, path);
+    trace(" add=%x%.0d", sceAvPlayerAddSource(g_player, path), 0);
     if (!g_tex) {
         /* a texture whose GXM descriptor is re-pointed at each decoded frame */
         static uint32_t dummy[64];
@@ -128,6 +151,12 @@ int movie_draw(void)
         return 0;
     /* the player only turns active once the source is opened and buffered: before the first
        frame, wait (up to ~3 s at 60 Hz) instead of taking "inactive" for the end */
+    if (g_waits == 60 || (g_frames == 0 && g_waits == 179)) {
+        SceAvPlayerStreamInfo si;
+        for (int i = 0; i < 2; i++)
+            if (sceAvPlayerGetStreamInfo(g_player, i, &si) == 0)
+                trace(" s%d:%dms", i, (int)si.duration);
+    }
     if (!sceAvPlayerIsActive(g_player)) {
         if (g_frames || ++g_waits > 180) {
             movie_stop();
@@ -170,6 +199,7 @@ int movie_draw(void)
 
 int movie_frames(void) { return g_frames; }
 int movie_alloc_failures(void) { return g_alloc_fail; }
+const char *movie_trace(void) { return g_trace; }
 
 void movie_stop(void)
 {

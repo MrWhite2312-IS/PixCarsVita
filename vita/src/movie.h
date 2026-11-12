@@ -15,5 +15,7 @@ void movie_stop(void);
 int movie_frames(void);
 /* Video-frame buffer allocations that failed so far (out of CDRAM). */
 int movie_alloc_failures(void);
+/* Player events, allocations and stream info of the current video (debug log). */
+const char *movie_trace(void);
 
 #endif
