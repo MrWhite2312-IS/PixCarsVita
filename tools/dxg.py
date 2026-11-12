@@ -86,10 +86,14 @@ def cstr(b):
     return b.split(b"\0", 1)[0].decode("latin-1")
 
 
-def parse(buf):
+def parse(buf, data=None):
+    """Parse a .dxg. With `data`, headers come from buf (a streamed "dgs" header from a
+    scene .soi) and indices/vertices from data (the object's bytes in the .xbox.str);
+    then the 16 bytes after the scales are a position offset (x, y, z) that is applied."""
     r = Reader(buf)
+    d = Reader(data) if data is not None else r
     magic, ver = r.take("4sI")
-    if magic != b"dxg\0" or ver != 5:
+    if magic not in (b"dxg\0", b"dgs\0") or ver != 5:
         raise DxgError(f"bad header {magic!r} v{ver}")
     if len(buf) == 8:  # empty placeholder file (header only)
         return {"nodes": [], "materials": [], "lods": [], "lod_flags": 0, "palettes": []}
@@ -115,25 +119,27 @@ def parse(buf):
                 raise DxgError(f"unknown vflags {vflags:#x} at {r.p:#x}")
             if vflags & 0x2000:          # quantized: scales + explicit declaration
                 scales = r.take("4f")
-                r.raw(16)
-                n, _u = r.take("IH")
+                off16 = r.raw(16)
+                n, _u = r.take("HI") if magic == b"dgs\0" else r.take("IH")
                 r.take(f"{n}f")
                 decl = r.raw(16)
             else:                        # plain float vertices, implicit declaration
                 scales = (1.0, 1.0, 1.0, 1.0)
-                n, _u = r.take("IH")
+                off16 = bytes(16)
+                n, _u = r.take("HI") if magic == b"dgs\0" else r.take("IH")
                 r.take(f"{n}f")
                 decl = FLOAT_DECL
             vc, ic = r.take("HH")
-            idx = r.take(f"{ic}H")
+            idx = d.take(f"{ic}H")
             streams = {}
             for bit, name, slots in STREAMS:
                 if vflags & bit:
                     for k, slot in enumerate(slots):
                         key = name if len(slots) == 1 else f"{name}{k}"
-                        streams[key] = r.raw(vc * struct.calcsize(slot_format(decl, slot)))
+                        streams[key] = d.raw(vc * struct.calcsize(slot_format(decl, slot)))
+            offset = struct.unpack("<3f", off16[:12]) if data is not None else (0.0, 0.0, 0.0)
             b = {"material": mat, "vflags": vflags, "scales": scales, "decl": decl,
-                 "vertex_count": vc, "strip": idx, "streams": streams}
+                 "vertex_count": vc, "strip": idx, "streams": streams, "offset": offset}
             if idx and max(idx) >= vc:
                 raise DxgError(f"index {max(idx)} >= vertex count {vc}")
             batches.append(b)
@@ -148,10 +154,11 @@ def parse(buf):
         for b in all_batches:
             # 0x80000000: one palette index per batch follows; 0x40000000: shared palette 0
             b["palette"] = r.take("B")[0] if npal & 0x80000000 else 0
-    if r.p != len(buf):
+    if data is None and r.p != len(buf):
         raise DxgError(f"{len(buf) - r.p} trailing bytes at {r.p:#x}")
     return {"nodes": nodes, "materials": materials, "lods": lods,
-            "lod_flags": lod_flags, "palettes": palettes}
+            "lod_flags": lod_flags, "palettes": palettes, "header_size": r.p,
+            "data_used": d.p if data is not None else None}
 
 
 def mat_mul(a, b):
@@ -207,7 +214,11 @@ def decode_batch(b):
         return [tuple(v * scale for v in vals)
                 for vals in struct.iter_unpack(fmt, b["streams"][name])]
 
-    return read("position", 0, ps), read("normal", 1, ns), read("uv", 3, us)
+    pos = read("position", 0, ps)
+    ox, oy, oz = b.get("offset", (0.0, 0.0, 0.0))
+    if pos and (ox or oy or oz):
+        pos = [(x + ox, y + oy, z + oz) for x, y, z in pos]
+    return pos, read("normal", 1, ns), read("uv", 3, us)
 
 
 def write_obj(mesh, path, lod=0):

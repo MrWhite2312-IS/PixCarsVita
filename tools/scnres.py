@@ -19,7 +19,8 @@ import os, struct, sys, zlib
 
 
 def load(path):
-    d = open(path, "rb").read()
+    """path: a .res file path or its bytes."""
+    d = path if isinstance(path, (bytes, bytearray)) else open(path, "rb").read()
     ver, dir_off = struct.unpack_from("<2I", d, 0)
     if ver != 3:
         raise ValueError(f"unsupported .res version {ver}")

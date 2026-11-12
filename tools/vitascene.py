@@ -31,18 +31,21 @@ DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
 SUN = scene.norm((0.45, 0.80, 0.40))
 
 
-def export(idx, key, keep=None, start_override=None, dir_override=None):
+def export(idx, key, keep=None, start_override=None, dir_override=None, streamed=None):
+    """streamed: optional (assets, meshes) from soultree.load/objects: the scene's streamed
+    terrain objects (already in world space) plus the bundle's own materials/textures."""
     inst, missing = scene.instances(idx, key)
+    assets = streamed[0] if streamed else {"dxm": {}, "dxt": {}}
     if keep:
         x, z, r = keep
         inst = [i for i in inst if math.dist((i[1][12], i[1][14]), (x, z)) < r]
     textures, tex_ids, materials, mat_ids = [], {}, [], {}
     meshes, mesh_ids, instances = [], {}, []
 
-    def tex_index(tk):
+    def tex_index(tk, raw=None):
         if tk not in tex_ids:
             tex_ids[tk] = len(textures)
-            textures.append(texture_blob(idx.read(tk)))
+            textures.append(texture_blob(raw if raw is not None else idx.read(tk)))
         return tex_ids[tk]
 
     def material_index(mat, near):
@@ -51,22 +54,30 @@ def export(idx, key, keep=None, start_override=None, dir_override=None):
             return mat_ids[k]
         layer = struct.pack("<iIIi6f2f", -1, 0, 0, -1, *([0.0] * 6), 0.5, 0.5)
         n = 0
-        mk = idx.find(mat, ".dxm", near)
-        if mk:
-            for p in dxm.parse(idx.read(mk).decode("latin-1"))["passes"]:
+        data = assets["dxm"].get(mat.lower())
+        mk = near
+        if data is None:
+            mk = idx.find(mat, ".dxm", near)
+            data = idx.read(mk) if mk else None
+        if data:
+            for p in dxm.parse(data.decode("latin-1"))["passes"]:
                 st = p.stages.get(1)
                 if not st or st["render_target"]:
                     continue
                 tk = idx.find(st["texture"], ".dxt", mk)
+                raw = None
                 if not tk:
-                    continue
+                    raw = assets["dxt"].get(st["texture"].lower())
+                    if raw is None:
+                        continue
+                    tk = "soi:" + st["texture"].lower()
                 flags = (1 if p.alpha_test else 0) \
                     | (2 if st["address_u"] in ("CLAMP", "BORDER") else 0) \
                     | (4 if st["address_v"] in ("CLAMP", "BORDER") else 0) \
                     | (8 if p.alpha_blend else 0) \
                     | (16 if p.alpha_blend and p.dst_blend == "ONE" else 0) \
                     | (32 if not p.z_write else 0)
-                layer = struct.pack("<iIIi6f2f", tex_index(tk), flags, p.alpha_ref, -1,
+                layer = struct.pack("<iIIi6f2f", tex_index(tk, raw), flags, p.alpha_ref, -1,
                                     *([0.0] * 6), 0.5, 0.5)
                 n = 1
                 break
@@ -75,10 +86,11 @@ def export(idx, key, keep=None, start_override=None, dir_override=None):
         materials.append(struct.pack("<I", n) + layer + empty)
         return mat_ids[k]
 
-    def mesh_index(mk):
+    def mesh_index(mk, m=None, near=None):
         if mk in mesh_ids:
             return mesh_ids[mk]
-        m = dxg.parse(idx.read(mk))
+        m = m or dxg.parse(idx.read(mk))
+        near = near or mk
         world = dxg.world_matrices(m)
         nm = world[0] if m["nodes"] else (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
         blobs, pts = [], []
@@ -100,7 +112,7 @@ def export(idx, key, keep=None, start_override=None, dir_override=None):
                     d = (n[0] * SUN[0] + n[1] * SUN[1] + n[2] * SUN[2]) / ln
                     s = int(255 * min(1.0, 0.5 + 0.6 * max(0.0, d)))
                     rgba += bytes((s, s, s, 255))
-            mi = material_index(m["materials"][b["material"]], mk)
+            mi = material_index(m["materials"][b["material"]], near)
             blob = struct.pack("<3I", mi, vc, len(b["strip"]))
             blob += struct.pack(f"<{vc * 3}f", *[c for p in pos for c in p])
             blob += struct.pack(f"<{vc * 2}f", *[c for t in uv for c in t])
@@ -121,6 +133,12 @@ def export(idx, key, keep=None, start_override=None, dir_override=None):
         c, r, _ = meshes[mi]
         wc = scene.transform(c, m)
         instances.append(struct.pack("<I16f4f", mi, *m, *wc, r))
+    ident = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+    tex_near = key.rsplit("\\", 1)[0] + "\\tex\\x.dxm"
+    for k, sm in enumerate(streamed[1] if streamed else []):
+        mi = mesh_index(("streamed", k), sm, tex_near)  # node matrix already applied
+        c, r, _ = meshes[mi]
+        instances.append(struct.pack("<I16f4f", mi, *ident, *c, r))
 
     # start: scene default if sensible, else the first instance
     secs = dict((s.lower(), kv) for s, kv in dxm.parse_ini(idx.read(key).decode("latin-1")))
@@ -154,7 +172,18 @@ def main():
     keep = tuple(float(x) for x in pos[:3]) if len(pos) >= 3 else None
     st = tuple(float(v) for v in opts["start"].split(",")) if "start" in opts else None
     di = tuple(float(v) for v in opts["dir"].split(",")) if "dir" in opts else None
-    data, nt, nm, nme, ni, missing = export(idx, a[0].lower().replace("/", "\\"), keep, st, di)
+    key = a[0].lower().replace("/", "\\")
+    streamed = None
+    res_key = key[:-4] + ".xbox.res"
+    if res_key in idx.files:  # scene with streamed Soultree terrain
+        import soultree
+        sectors, headers, soi, stream, assets = soultree.load(idx.read(res_key),
+                                                               idx.read(key[:-4] + ".xbox.str"))
+        ms = [m for _, _, m in soultree.objects(sectors, headers, soi, stream)
+              if m and not isinstance(m, Exception)]
+        streamed = (assets, ms)
+        print(f"streamed terrain: {len(ms)} objects")
+    data, nt, nm, nme, ni, missing = export(idx, key, keep, st, di, streamed)
     os.makedirs(os.path.dirname(os.path.abspath(a[1])), exist_ok=True)
     open(a[1], "wb").write(data)
     print(f"{a[1]}: {len(data) / 1e6:.1f} MB  textures={nt} materials={nm} meshes={nme} "

@@ -25,11 +25,13 @@ ALPHA_FUNCS = {
 }
 
 
-def _tex_from_stage(idx, st, p, mk):
+def _tex_from_stage(idx, st, p, mk, extra=None):
+    """extra: optional {lowercase texture name: raw .dxt bytes} used when the paks lack it."""
     tk = idx.find(st["texture"], ".dxt", mk)
-    if not tk:
+    raw = idx.read(tk) if tk else (extra or {}).get(st["texture"].lower())
+    if not raw:
         return None
-    w, h, rgba = dxt.decode(dxt.parse(idx.read(tk)))
+    w, h, rgba = dxt.decode(dxt.parse(raw))
     return {
         "w": w, "h": h, "rgba": rgba,
         "clamp_u": st["address_u"] in ("CLAMP", "BORDER"),
@@ -39,6 +41,7 @@ def _tex_from_stage(idx, st, p, mk):
         # alpha only cuts pixels when the material enables alpha testing;
         # otherwise it is a mask for other passes (reflection strength etc.)
         "alpha_test": ALPHA_FUNCS.get(p.alpha_func) if p.alpha_test else None,
+        "blend": p.alpha_blend,
         "ref": p.alpha_ref,
         "offset": (0.0, 0.0),
     }

@@ -114,7 +114,9 @@ def render_perspective(batches, positions, layers, eye, target, w, h, fov=60.0, 
     img = bytearray(bytes((sky[0], sky[1], sky[2], 255)) * (w * h))
     zbuf = [far] * (w * h)
     light = norm((0.4, 0.8, 0.3))
-    for b, pos, lay in zip(batches, positions, layers):
+    # opaque first, alpha-blended (decals, baked shadows) last
+    order = sorted(zip(batches, positions, layers), key=lambda x: bool(x[2] and x[2][0].get("blend")))
+    for b, pos, lay in order:
         _, _, uv = dxg.decode_batch(b)
         cam = []
         for p in pos:
@@ -166,6 +168,12 @@ def render_perspective(batches, positions, layers, eye, target, w, h, fov=60.0, 
                         if tex["alpha_test"] and not tex["alpha_test"](t[3], tex["ref"]):
                             continue
                         r, g, bl = t[0], t[1], t[2]
+                        if tex.get("blend"):  # alpha blend over what is there, no depth write
+                            a_ = t[3] / 255.0
+                            o = img[k * 4:k * 4 + 3]
+                            img[k * 4:k * 4 + 3] = bytes(int(c * shade * a_ + oc * (1 - a_))
+                                                         for c, oc in zip((r, g, bl), o))
+                            continue
                     else:
                         r = g = bl = 160
                     fog = min(1.0, max(0.0, (z - far * 0.4) / (far * 0.6)))
