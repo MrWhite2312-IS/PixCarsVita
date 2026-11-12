@@ -24,6 +24,7 @@ add_executable(${PROJECT_NAME}
   src/car.c
   src/audio.c
   src/movie.c
+  src/ui.c
 )
 
 target_link_libraries(${PROJECT_NAME}

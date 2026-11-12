@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dxg, scnres
 
 BS = chr(92)
-NAME_RE = re.compile(rb"(Sector_\d+|Scenes\x5c[^\x00]+|C_[A-Za-z0-9_]+)\x00")
+NAME_RE = re.compile(rb"(Sector_\d+|FE_[A-Za-z0-9_]+|Scenes\x5c[^\x00]+|C_[A-Za-z0-9_]+)\x00")
 
 
 def load(res_path, str_path):
@@ -46,7 +46,7 @@ def load(res_path, str_path):
     for m in NAME_RE.finditer(toc):
         name = m.group(1).decode("latin-1")
         st = m.start()
-        if name.startswith("Sector_"):
+        if name.startswith(("Sector_", "FE_")):  # the front end names its sectors FE_Wel/Sel/Ram
             f = struct.unpack_from("<25I", toc, st + 256)
             ff = struct.unpack_from("<25f", toc, st + 256)
             cur = {"name": name, "bbox": ff[15:21], "offset": f[21], "objects": []}

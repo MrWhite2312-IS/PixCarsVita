@@ -44,6 +44,18 @@ mostraban estirados a 4:3; se restaura 4:3 y se recorta el centro a 16:9 (960×5
 para el decodificador por hardware. Al arrancar suenan los logos del juego en su orden
 original (BVG, THQ, Rainbow, Pixar); ✕ o START los saltan.
 
+Menú del juego (fuentes, textos en español, capas y cámaras del autocine) y su escena:
+
+```bash
+python tools/vitaui.py extracted/vita/ui
+python tools/vitascene.py 'data\scenes\fe\fe.scn' extracted/vita/scene/fe.vcs
+```
+
+Copia `extracted/vita/ui/` a `ux0:data/pixcars/ui/` y `fe.vcs` a `ux0:data/pixcars/scene/`.
+Tras los logos sale la pantalla de título («Pulsa el botón START»); START o ✕ abre el menú
+principal (←/→ elige, ✕ acepta, ○ vuelve al título). «Modo historia» entra a Radiator
+Springs; «Salir del juego» cierra. En juego, START vuelve al menú.
+
 ## 3. Compilar
 
 Requiere [VitaSDK](https://vitasdk.org) con vitaGL instalado (`vdpm vitaGL`).
@@ -66,7 +78,7 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 | ✕ | Pausa |
 | ○ | Pose base |
 | □ | Activar/desactivar iluminación |
-| START | Salir |
+| START | Volver al menú principal (sin menú exportado: salir) |
 
 ### Escenario (SELECT) — conducir a McQueen
 

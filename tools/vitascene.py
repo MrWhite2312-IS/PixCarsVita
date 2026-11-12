@@ -167,10 +167,12 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
         kv = secs.get(s, {})
         if "defaultstartposition" in kv:
             start = scene.vec(kv["defaultstartposition"][1])
-    xs = sorted(i[1][12] for i in inst)
-    zs = sorted(i[1][14] for i in inst)
-    ys = sorted(i[1][13] for i in inst)
-    if not start or min(math.dist((start[0], start[2]), (i[1][12], i[1][14])) for i in inst) > 2000:
+    xs = sorted(i[1][12] for i in inst) or [0.0]
+    zs = sorted(i[1][14] for i in inst) or [0.0]
+    ys = sorted(i[1][13] for i in inst) or [0.0]
+    if not inst:  # streamed-only scene (e.g. the front end): keep SceneInfo's start
+        start = start or (0.0, 60.0, 0.0)
+    elif not start or min(math.dist((start[0], start[2]), (i[1][12], i[1][14])) for i in inst) > 2000:
         start = (xs[len(xs) // 2], ys[len(ys) // 2] + 60, zs[len(zs) // 2])
     # the game spawns at a [StartPositionToyN] of the scene's .toy (activities name one with
     # NextStart, e.g. Player1Start): prefer that over SceneInfo's default

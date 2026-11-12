@@ -43,6 +43,7 @@
 #include "car.h"
 #include "audio.h"
 #include "movie.h"
+#include "ui.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -77,6 +78,9 @@ static VcsScene g_scene;
 static int g_scene_loaded;
 static char g_scene_names[MAX_SCENES][64];
 static int g_n_scenes, g_scene_cur;
+static float g_far = SCENE_FAR; /* the front end's sky sits ~14000 ft from its cameras */
+static Ui g_ui;
+static int g_have_ui;
 static Audio g_audio;
 static volatile int g_audio_run, g_audio_next;
 
@@ -369,11 +373,11 @@ static void free_scene(void)
     g_scene_loaded = 0;
 }
 
-static int load_scene(int index)
+static int load_scene_named(const char *name)
 {
     char path[256];
     free_scene();
-    snprintf(path, sizeof path, DATA_ROOT "scene/%s.vcs", g_scene_names[index]);
+    snprintf(path, sizeof path, DATA_ROOT "scene/%s.vcs", name);
     plog("loading scene %s", path);
     int r = vcs_load_file(&g_scene, path);
     if (r) {
@@ -409,9 +413,13 @@ static int load_scene(int index)
     plog("collision: %d, %u triangles, grid %dx%d", r, g_col.n_tri, g_col.nx, g_col.nz);
     car_spawn(&g_car, &g_params, &g_col, g_scene.start, atan2f(g_scene.start_dir[0], g_scene.start_dir[2]));
     g_scene_loaded = 1;
-    sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", g_scene_names[index],
-                  g_scene.n_mesh, g_scene.n_inst);
+    sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", name, g_scene.n_mesh, g_scene.n_inst);
     return 0;
+}
+
+static int load_scene(int index)
+{
+    return load_scene_named(g_scene_names[index]);
 }
 
 static void list_scenes(void)
@@ -436,7 +444,7 @@ static void scene_camera(const float eye[3], float yaw, float pitch, float fwd_o
     float znear = 1.0f;
     float top = znear * tanf(32.0f * 3.14159265f / 180.0f);
     float right = top * (float)SCREEN_W / (float)SCREEN_H;
-    glFrustum(-right, right, -top, top, znear, SCENE_FAR);
+    glFrustum(-right, right, -top, top, znear, g_far);
 
     float f[3] = { sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch) };
     memcpy(fwd_out, f, sizeof f);
@@ -472,7 +480,7 @@ static void draw_scene(const float eye[3], const float fwd[3])
         const VcsInstance *in = &g_scene.inst[i];
         float d[3] = { in->center[0] - eye[0], in->center[1] - eye[1], in->center[2] - eye[2] };
         float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-        if (dist - in->radius > SCENE_FAR)
+        if (dist - in->radius > g_far)
             continue;
         if (d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2] < -in->radius)
             continue; /* entirely behind the camera */
@@ -732,6 +740,78 @@ static void play_movie(const char *name)
     movie_stop();
 }
 
+/* The game's front end (act\FrontEndUI, scene FE, the drive-in): the "Title Screen" page over
+   camera FE_Wel, then the "MainMenu" page (menu background + sign menu) over FE_Sel. Returns
+   when Story Mode is chosen; Quit Game exits. Without the exported UI it returns at once. */
+static void run_front_end(void)
+{
+    if (!g_have_ui || load_scene_named("fe"))
+        return;
+    g_far = 16000.0f;
+    Ui *ui = &g_ui;
+    /* the pages' dynamic texts: TitleScreen shows STR_START; MainMenu sets TitleTextID
+       STR_MAIN_MENU and AcceptTextID STR_SELECT, no back button */
+    ui_set_str(ui, "STR_DYN_MENU_LABEL1", ui_str(ui, "STR_START"));
+    ui_set_str(ui, "STR_DYN_MENU_TITLE", ui_str(ui, "STR_MAIN_MENU"));
+    ui_set_str(ui, "STR_DYN_MENU_ACCEPT_TEXT", ui_str(ui, "STR_SELECT"));
+    ui_set_str(ui, "STR_DYN_MENU_ACCEPT_TEXT_BTN", "X"); /* shortcut: the PC showed its key name; Vita Cross */
+    int page = 0, sel = 0;
+    float t = 0;
+    uint32_t prev = ~0u; /* ignore buttons still held from the previous screen */
+    SceUInt64 last = sceKernelGetProcessTimeWide();
+    plog("front end");
+    for (;;) {
+        SceCtrlData pad;
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+        uint32_t pressed = pad.buttons & ~prev;
+        prev = pad.buttons;
+        SceUInt64 now = sceKernelGetProcessTimeWide();
+        t += (float)(now - last) / 1000000.0f;
+        last = now;
+        if (page == 0) {
+            if (pressed & (SCE_CTRL_START | SCE_CTRL_CROSS))
+                page = 1;
+        } else if (ui->n_sign) {
+            if (pressed & SCE_CTRL_LEFT)
+                sel = (sel + ui->n_sign - 1) % ui->n_sign;
+            if (pressed & SCE_CTRL_RIGHT)
+                sel = (sel + 1) % ui->n_sign;
+            if (pressed & SCE_CTRL_CIRCLE)
+                page = 0;
+            if (pressed & SCE_CTRL_CROSS) {
+                const char *id = ui->sign[sel].id;
+                plog("main menu: %s", id);
+                if (!strcmp(id, "STR_STORY_MODE"))
+                    break;
+                if (!strcmp(id, "STR_EXIT_GAME"))
+                    sceKernelExitProcess(0);
+                /* shortcut: Arcade, Versus, Options and Bonus Content pages are not ported yet */
+            }
+        }
+        const UiCamera *cm = ui_camera(ui, page ? "FE_Sel" : "FE_Wel");
+        glViewport(0, 0, SCREEN_W, SCREEN_H);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        if (cm) {
+            float fwd[3];
+            scene_camera(cm->pos, atan2f(cm->fwd[0], cm->fwd[2]), asinf(cm->fwd[1]), fwd);
+            draw_scene(cm->pos, fwd);
+        }
+        ui_begin();
+        if (page == 0) {
+            ui_draw_layer(ui, "TitleScreen");
+        } else {
+            ui_draw_layer(ui, "FrontEndMenuBackground");
+            ui_draw_signs(ui, sel, t);
+        }
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        vglSwapBuffers(GL_FALSE);
+    }
+    g_far = SCENE_FAR;
+}
+
 /* ------------------------------------------------------------------ main */
 int main(void)
 {
@@ -764,9 +844,16 @@ int main(void)
     plog("audio: %d tracks, %d engine loops", g_audio.n_tracks, g_audio.n_loops);
     list_scenes();
     plog("scenes listed: %d", g_n_scenes);
-    if (!have_char && g_n_scenes)
-        load_scene(0); /* no character: go straight to the scene */
-    int mode = have_char ? 0 : 1; /* 0 character, 1 scene */
+    g_have_ui = ui_load(&g_ui, DATA_ROOT "ui/", upload_texture) == 0;
+    plog("ui: %s", g_have_ui ? "ok" : "missing");
+    run_front_end();
+    /* Story Mode: Radiator Springs, driving (shortcut: CS_Intro and the activity chain come next) */
+    for (int i = 0; i < g_n_scenes; i++)
+        if (!strcmp(g_scene_names[i], "rs"))
+            g_scene_cur = i;
+    if (g_n_scenes && (g_have_ui || !have_char))
+        load_scene(g_scene_cur);
+    int mode = g_scene_loaded ? 1 : 0; /* 0 character viewer, 1 scene */
     if (!have_char && !g_scene_loaded) {
         /* nothing to show: red screen so the user knows the data is missing */
         for (int i = 0; i < 300; i++) {
@@ -819,8 +906,20 @@ int main(void)
         sceCtrlPeekBufferPositive(0, &pad, 1);
         uint32_t pressed = pad.buttons & ~prev_buttons;
         prev_buttons = pad.buttons;
-        if (pad.buttons & SCE_CTRL_START)
-            break;
+        if (pressed & SCE_CTRL_START) {
+            if (!g_have_ui)
+                break;
+            /* back to the front end, then into the same scene again */
+            g_audio.engine_vol = 0;
+            stop_drive_sounds(&dsfx);
+            run_front_end();
+            load_scene(g_scene_cur);
+            memcpy(cam, g_scene.start, sizeof cam);
+            mode = 1;
+            chase_init = 0;
+            last = sceKernelGetProcessTimeWide();
+            continue;
+        }
 
         SceUInt64 now = sceKernelGetProcessTimeWide();
         float dt = (float)(now - last) / 1000000.0f;
