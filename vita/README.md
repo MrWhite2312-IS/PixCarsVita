@@ -57,14 +57,17 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 
 ### Escenario (SELECT) — conducir a McQueen
 
+Controles del preset 1 del juego (acelerar A, frenar X, freno de mano Y, powerslide RT).
+
 | Botón | Acción |
 |---|---|
-| R / ✕ | Acelerar |
-| L / □ | Frenar; parado, marcha atrás |
+| ✕ | Acelerar |
+| □ / L | Frenar; parado, marcha atrás |
 | Stick izquierdo | Girar |
-| ○ | Freno de mano |
+| △ | Freno de mano |
+| R (mantener) | Powerslide (derrape controlado, con el volante a fondo) |
 | Cruceta ↓ | Recolocar el coche (derecho, en el sitio) |
-| △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
+| ○ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
 | Cruceta → | Siguiente canción |
 
 La física (`src/car.c`) usa los parámetros del propio juego, `mcq.phy` (lo copia

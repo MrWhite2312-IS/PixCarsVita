@@ -121,6 +121,22 @@ int main(int argc, char **argv)
     car_spawn(&c, &P, &w, c.pos, 0);
     assert(c.pos[0] == px && c.pos[2] == pz && fabsf(c.pos[1] - 3.0f) < 1e-3f);
 
+    /* powerslide: same state, full lock with and without the Powerslide action */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, gas, 5);
+    Car base = c, slide = c;
+    CarInput lock = { 1, 0, 1, 0 }, lock_ps = { 1, 0, 1, 0, 1 };
+    run(&base, &w, lock, 1.0f);
+    run(&slide, &w, lock_ps, 1.0f);
+    float yb = atan2f(base.rot[6], base.rot[8]), ys = atan2f(slide.rot[6], slide.rot[8]);
+    printf("powerslide: %.1f mph, yaw after 1s %.2f (grip) vs %.2f (slide), state %d\n",
+           car_speed(&c) * 0.681818f, yb, ys, slide.ps);
+    assert(slide.ps == 1 && ys > yb);
+    run(&slide, &w, lock, 0.2f);
+    assert(slide.ps == 2); /* exit phase after release */
+    run(&slide, &w, lock, 0.5f);
+    assert(slide.ps == 0);
+
     /* straight into the wall at z = 1600 */
     car_spawn(&c, &P, &w, (float[3]){ 0, 0, 1200 }, 0);
     run(&c, &w, idle, 1);

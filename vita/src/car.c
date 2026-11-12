@@ -300,6 +300,10 @@ static const CarParams MCQ_DEFAULTS = {
     .low_rpm = 1000, .low_up = 5500, .low_down = 2000, .high_rpm = 1500, .high_up = 6700, .high_down = 4500,
     .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
     .aero_area = 35, .aero_drag = 0.3f,
+    .ps_hs_yaw = 1.65f, .ps_min_speed = 23, .ps_max_speed = 200, .ps_threshold = 0.95f,
+    .ps_front = 0.9f, .ps_rear = 0.74f, .ps_torque = 10.8f, .ps_exit_time = 0.45f,
+    .ps_front_exit = 1.2f, .ps_rear_exit = 1.4f, .ps_exit_yaw = 0.9f, .ps_steer_scale = 1.0f,
+    .ps_rear_steer_scale = -0.2f,
     .steer_power = 2, .x_rate = 25, .gas_rate = 4, .brake_rate = 20, .reverse_steer = 0.4f,
     .steer_speed = { 0, 80, 100 }, .steer_scale = { 0.6f, 0.23f, 0.28f },
     .cam_offset = { 0, 6, 0 }, .cam_distance = 16,
@@ -365,7 +369,21 @@ void car_params_parse(CarParams *p, const char *t)
     ini_f(t, M, "BodyFriction", &p->body_friction, 1);
     ini_f(t, M, "YawRateLimit", &p->yaw_rate_limit, 1);
     ini_f(t, M, "NormalLoadScale", &p->normal_load_scale, 1);
-    ini_f(t, "Powerslide", "HandBrakeFrictionScale", &p->handbrake_scale, 1);
+    const char *PS = "Powerslide";
+    ini_f(t, PS, "HandBrakeFrictionScale", &p->handbrake_scale, 1);
+    ini_f(t, PS, "PowerslideHighSpeedYawRateLimit", &p->ps_hs_yaw, 1);
+    ini_f(t, PS, "PowerslideMinSpeed", &p->ps_min_speed, 1);
+    ini_f(t, PS, "PowerslideMaxSpeed", &p->ps_max_speed, 1);
+    ini_f(t, PS, "PowerslideThreshold", &p->ps_threshold, 1);
+    ini_f(t, PS, "PowerslideFrontFrictionScale", &p->ps_front, 1);
+    ini_f(t, PS, "PowerslideRearFrictionScale", &p->ps_rear, 1);
+    ini_f(t, PS, "PowerslideTorqueScale", &p->ps_torque, 1);
+    ini_f(t, PS, "PowerslideExitTime", &p->ps_exit_time, 1);
+    ini_f(t, PS, "PowerslideFrontExitFrictionScale", &p->ps_front_exit, 1);
+    ini_f(t, PS, "PowerslideRearExitFrictionScale", &p->ps_rear_exit, 1);
+    ini_f(t, PS, "PowerslideExitYawRateLimit", &p->ps_exit_yaw, 1);
+    ini_f(t, PS, "PowerslideSteeringScale", &p->ps_steer_scale, 1);
+    ini_f(t, PS, "PowerslideRearSteeringScale", &p->ps_rear_steer_scale, 1);
     static const char *TN[4] = { "FrontLeftTire", "FrontRightTire", "RearLeftTire", "RearRightTire" };
     for (int i = 0; i < 4; i++) {
         TireParams *tp = &p->tire[i];
@@ -554,6 +572,8 @@ static float drivetrain(Car *c, float dt)
     float mult = (c->rpm > trans && c->rpm > 0 && trans > 0)
                  ? p->max_k + (1.0f - p->max_k) * trans / c->rpm : p->max_k;
     float out = pump * mult;
+    if (ratio > 0 && w > 0)
+        out *= c->boost; /* engine +104: the powerslide torque scale */
 
     /* automatic shifts at the load-dependent RPMs (shortcut: the PS2 shift scheduler is not
        decoded; this uses the .phy thresholds on engine rpm with the shift durations) */
@@ -655,7 +675,7 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         madd(T, tq, 1);
 
         /* tyre frame on the ground plane (PS2 0x232350) */
-        float s = i < 2 ? c->steer : 0, cs = cosf(s), sn = sinf(s);
+        float s = i < 2 ? c->steer : c->rear_steer, cs = cosf(s), sn = sinf(s);
         float wf[3], ws[3];
         for (int k2 = 0; k2 < 3; k2++) {
             wf[k2] = f[k2] * cs + r[k2] * sn;
@@ -684,9 +704,7 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         float fx = -(c->slip[i] > 0 ? 1.0f : -1.0f) * table(&tp->drive, c->slip[i], 1.0f) * fn;
         float load = p->weight * 0.25f + (fn - p->weight * 0.25f) * p->normal_load_scale;
         float fy = -(alpha > 0 ? 1.0f : -1.0f) * table(&tp->side, alpha * 0.99f, 1.5707963f) * load;
-        if (rear && handbrake)
-            fy *= p->handbrake_scale; /* shortcut: assumed to scale the rear lateral grip (the
-                                          vehicle code that sets the per-tyre scales is not decoded) */
+        fy *= c->lat_scale[i]; /* tyre +892: powerslide / exit / handbrake scales (PS2 0x382320) */
         c->fx_prev[i] = fx;
         float ft[3] = { 0, 0, 0 };
         madd(ft, wf, fx);
@@ -709,8 +727,8 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
     madd(c->angvel, u, dot3(T, u) / I[1] * h);
     madd(c->angvel, f, dot3(T, f) / I[2] * h);
     float yr = dot3(c->angvel, u);
-    if (fabsf(yr) > p->yaw_rate_limit)
-        madd(c->angvel, u, (yr > 0 ? p->yaw_rate_limit : -p->yaw_rate_limit) - yr);
+    if (fabsf(yr) > c->yaw_limit)
+        madd(c->angvel, u, (yr > 0 ? c->yaw_limit : -c->yaw_limit) - yr);
     for (int k = 0; k < 3; k++) {
         float dv[3];
         cross3(c->angvel, c->rot + k * 3, dv);
@@ -767,6 +785,45 @@ void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
     if (speed < -1.0f)
         scale *= p->reverse_steer;
     c->steer = c->steer_in * scale * p->tire[0].max_steer * 3.14159265f / 180.0f;
+    /* powerslide state machine (PS2 0x382320): enter while the Powerslide action is held with
+       the stick past PowerslideThreshold between Min/MaxSpeed; exit phase on release.
+       shortcut: the reverse/low-speed variants and the Min/MaxAngle rear friction blend are not
+       ported; add them if sliding at low speed feels off. */
+    float shaped_x = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p->steer_power);
+    if (c->ps == 0 && in->powerslide && fabsf(shaped_x) > p->ps_threshold &&
+        speed > p->ps_min_speed && speed < p->ps_max_speed) {
+        c->ps = 1;
+        c->ps_entry_speed = speed;
+    } else if (c->ps == 1 && (!in->powerslide || speed <= p->ps_min_speed)) {
+        c->ps = 2;
+        c->ps_timer = p->ps_exit_time;
+    } else if (c->ps == 2 && (c->ps_timer -= dt) <= 0) {
+        c->ps = 0;
+    }
+    for (int i = 0; i < 4; i++)
+        c->lat_scale[i] = 1.0f;
+    c->yaw_limit = p->yaw_rate_limit;
+    c->boost = 1.0f;
+    c->rear_steer = 0;
+    if (c->ps == 1) {
+        c->steer *= p->ps_steer_scale;
+        c->rear_steer = c->steer * p->ps_rear_steer_scale;
+        c->lat_scale[0] = c->lat_scale[1] = p->ps_front;
+        c->lat_scale[2] = c->lat_scale[3] = p->ps_rear;
+        c->yaw_limit = p->ps_hs_yaw;
+        c->boost = 1.0f + fmaxf(0.0f, p->ps_torque + 0.5f * (c->ps_entry_speed - speed));
+    } else if (c->ps == 2) {
+        c->lat_scale[0] = c->lat_scale[1] = p->ps_front_exit;
+        c->lat_scale[2] = c->lat_scale[3] = p->ps_rear_exit;
+        c->yaw_limit = p->ps_exit_yaw;
+    } else if (in->handbrake) {
+        /* handbrake (0x382a00): rear grip scaled until the car has turned 270 degrees */
+        c->hb_yaw += dot3(c->angvel, c->rot + 3) * dt;
+        if (fabsf(c->hb_yaw) < 4.712f)
+            c->lat_scale[2] = c->lat_scale[3] = p->handbrake_scale;
+    }
+    if (!in->handbrake)
+        c->hb_yaw = 0;
     float hub = drivetrain(c, dt);
     int n = (int)ceilf(dt * 240.0f);
     if (n < 1) n = 1;

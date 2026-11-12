@@ -11,15 +11,15 @@
  *            Cross       pause / resume    Circle        bind pose
  *            Square      toggle lighting
  * Scene mode (Select switches; ux0:data/pixcars/scene/<name>.vcs listed in scenes.txt),
- * driving McQueen (default):
- *            R / Cross   accelerate        L / Square    brake, then reverse
- *            left stick  steer             Circle        handbrake
- *            D-pad down  reset the car     Triangle      free camera
- *            D-pad right next music track
+ * driving McQueen (default), the game's preset 1 (Gas A, Brake X, EBrake Y, Powerslide RT):
+ *            Cross       accelerate        Square / L    brake, then reverse
+ *            left stick  steer             Triangle      handbrake
+ *            R (hold)    powerslide        Circle        free camera
+ *            D-pad down  reset the car     D-pad right   next music track
  * free camera:
  *            left stick  move / strafe     right stick   look
  *            D-pad up/dn rise / descend    R (hold)      fast
- *            L           next scene        Triangle      back to driving
+ *            L           next scene        Circle        back to driving
  * Start      quit
  *
  * No game data is embedded in the VPK: the user converts their own copy on PC.
@@ -701,17 +701,18 @@ int main(void)
             plog("mode -> %s", mode ? "scene" : "character");
         }
 
-        if (mode == 1 && have_char && (pressed & SCE_CTRL_TRIANGLE)) {
+        if (mode == 1 && have_char && (pressed & SCE_CTRL_CIRCLE)) {
             driving = !driving;
             chase_init = 0;
         }
         if (mode == 1 && driving && g_scene_loaded) {
             int lx = (int)pad.lx - 128;
             CarInput in = { 0 };
-            in.throttle = (pad.buttons & (SCE_CTRL_RTRIGGER | SCE_CTRL_CROSS)) ? 1.0f : 0.0f;
+            in.throttle = (pad.buttons & SCE_CTRL_CROSS) ? 1.0f : 0.0f;
             in.brake = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) ? 1.0f : 0.0f;
             in.steer = abs(lx) > 16 ? lx / 128.0f : 0.0f;
-            in.handbrake = (pad.buttons & SCE_CTRL_CIRCLE) != 0;
+            in.handbrake = (pad.buttons & SCE_CTRL_TRIANGLE) != 0;
+            in.powerslide = (pad.buttons & SCE_CTRL_RTRIGGER) != 0;
             if (pressed & SCE_CTRL_DOWN) {
                 float yaw_now = atan2f(g_car.rot[6], g_car.rot[8]);
                 car_spawn(&g_car, &g_params, &g_col, g_car.pos, yaw_now);

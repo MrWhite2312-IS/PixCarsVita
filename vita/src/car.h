@@ -48,6 +48,9 @@ typedef struct {
     float low_rpm, low_up, low_down, high_rpm, high_up, high_down;
     float shift_up_time, shift_up_throttle, shift_down_time, shift_down_throttle;
     float aero_area, aero_drag;
+    /* [Powerslide] */
+    float ps_hs_yaw, ps_min_speed, ps_max_speed, ps_threshold, ps_front, ps_rear, ps_torque;
+    float ps_exit_time, ps_front_exit, ps_rear_exit, ps_exit_yaw, ps_steer_scale, ps_rear_steer_scale;
     float steer_power, x_rate, gas_rate, brake_rate, reverse_steer;
     float steer_speed[3], steer_scale[3];
     float cam_offset[3], cam_distance;
@@ -61,6 +64,7 @@ typedef struct {
     float brake;               /* 0..1, reverses once stopped */
     float steer;               /* -1 left .. 1 right (raw stick) */
     int handbrake;
+    int powerslide;            /* the game's Powerslide action (held) */
 } CarInput;
 
 typedef struct {
@@ -77,6 +81,9 @@ typedef struct {
     float fx_prev[4];          /* last longitudinal tyre force (lbf), loads the wheel spin */
     int gear;                  /* 1..n, -1 reverse */
     float rpm, shift_t;
+    int ps;                    /* powerslide: 0 off, 1 sliding, 2 exiting */
+    float ps_entry_speed, ps_timer, hb_yaw;
+    float rear_steer, lat_scale[4], yaw_limit, boost;
     int grounded;
 } Car;
 
