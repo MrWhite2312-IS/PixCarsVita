@@ -752,8 +752,10 @@ static int ui_sound(const char *name, int loop)
    when Story Mode is chosen; Quit Game exits. Without the exported UI it returns at once. */
 static void run_front_end(void)
 {
-    if (!g_have_ui || load_scene_named("fe"))
+    if (!g_have_ui)
         return;
+    if (load_scene_named("fe"))
+        plog("front end: scene/fe.vcs missing, menu drawn over black");
     g_far = 16000.0f;
     Ui *ui = &g_ui;
     /* the pages' dynamic texts: TitleScreen shows STR_START; MainMenu sets TitleTextID
@@ -835,7 +837,7 @@ static void run_front_end(void)
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
-        if (cm) {
+        if (cm && g_scene_loaded) {
             float fwd[3];
             scene_camera(cm->pos, atan2f(cm->fwd[0], cm->fwd[2]), asinf(cm->fwd[1]), fwd);
             draw_scene(cm->pos, fwd);
