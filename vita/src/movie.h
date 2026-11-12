@@ -6,7 +6,7 @@
 #ifndef PIXCARS_MOVIE_H
 #define PIXCARS_MOVIE_H
 
-/* Start a video; returns 0 on success (nothing plays if the file is missing). */
+/* Start a video: 0 on success, -1 file missing, else an SCE error (module load / player init). */
 int movie_start(const char *path);
 /* Draw the current frame full-screen; returns 1 while the video is playing. */
 int movie_draw(void);

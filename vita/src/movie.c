@@ -84,7 +84,9 @@ int movie_start(const char *path)
         return -1;
     static int loaded;
     if (!loaded) {
-        sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
+        int m = sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
+        if (m < 0)
+            return m;
         loaded = 1;
     }
     SceAvPlayerInitData init;
@@ -98,7 +100,7 @@ int movie_start(const char *path)
     init.autoStart = 1;
     g_player = sceAvPlayerInit(&init);
     if (g_player < 0)
-        return -2;
+        return g_player < -2 ? g_player : -2; /* SCE error code for the log */
     sceAvPlayerAddSource(g_player, path);
     if (!g_tex) {
         /* a texture whose GXM descriptor is re-pointed at each decoded frame */

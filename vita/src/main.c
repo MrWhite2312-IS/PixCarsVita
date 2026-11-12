@@ -714,9 +714,10 @@ static void play_movie(const char *name)
 {
     char path[256];
     snprintf(path, sizeof path, DATA_ROOT "movies/%s.mp4", name);
-    if (movie_start(path))
+    int r = movie_start(path);
+    plog("movie %s: %s (%d)", path, r == 0 ? "playing" : (r == -1 ? "file not found" : "player init failed"), r);
+    if (r)
         return;
-    plog("movie %s", name);
     uint32_t prev = ~0u;
     while (movie_draw()) {
         vglSwapBuffers(GL_FALSE);
@@ -742,6 +743,7 @@ int main(void)
             fclose(f);
     }
     plog("start");
+    plog("boot logos");
     /* the game's VideoLogos sequence (PS2 ELF table: BVGLogo, THQLogo, Rainbow, PixLogo) */
     static const char *LOGOS[] = { "bvglogo", "thqlogo", "rainbow", "pixlogo" };
     for (int i = 0; i < 4; i++)
