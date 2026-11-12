@@ -137,7 +137,10 @@ def parse(buf, data=None):
                     for k, slot in enumerate(slots):
                         key = name if len(slots) == 1 else f"{name}{k}"
                         streams[key] = d.raw(vc * struct.calcsize(slot_format(decl, slot)))
-            offset = struct.unpack("<3f", off16[:12]) if data is not None else (0.0, 0.0, 0.0)
+            # dgs: always a position offset; dxg: only when its 4th word is 1 (world-space
+            # landmarks such as RS_JC_RCRadiatorCap_LM), otherwise leftover bytes
+            use = data is not None or struct.unpack_from("<I", off16, 12)[0] == 1
+            offset = struct.unpack("<3f", off16[:12]) if use else (0.0, 0.0, 0.0)
             b = {"material": mat, "vflags": vflags, "scales": scales, "decl": decl,
                  "vertex_count": vc, "strip": idx, "streams": streams, "offset": offset}
             if idx and max(idx) >= vc:
