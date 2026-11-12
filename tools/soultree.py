@@ -60,13 +60,37 @@ def load(res_path, str_path):
     assets = {"dxm": {k.rsplit(BS, 1)[-1][:-4]: v for k, v in files.items() if k.endswith(".dxm")},
               "dxt": {}}
     tag = b"Scenes" + BS.encode()
+    streamed = {}
     r = 0
     while (r := soi.find(tag, r)) >= 0:
         rec = r - 8
         if rec >= 0 and soi[rec + 276:rec + 280] == b"\x02\x00\x00\x00":
             name = soi[r:r + 256].split(b"\0", 1)[0].decode("latin-1").rsplit(BS, 1)[-1].lower()
             assets["dxt"].setdefault(name, soi[rec + 276:])
+        elif rec >= 0 and soi[rec + 276:rec + 280] == b"\x02\x10\x00\x00":
+            # streamed: header u32 0x1002, fmt, npal, mips, w, h; texels are a toc type-1
+            # object in the sector data, largest mip first. Rebuilt as a plain v2 .dxt.
+            name = soi[r:r + 256].split(b"\0", 1)[0].decode("latin-1").rsplit(BS, 1)[-1].lower()
+            streamed.setdefault(name, struct.unpack_from("<5I", soi, rec + 280))
         r += 1
+    for sec in sectors:
+        for ob in sec["objects"]:
+            name = ob["name"].rsplit(BS, 1)[-1].lower()
+            if ob["type"] != 1 or name not in streamed or name in assets["dxt"]:
+                continue
+            fmt, npal, mips, w, h = streamed[name]
+            bpb = {0x26: 8, 0x32: 16, 0x36: 16}.get(fmt)
+            if npal or not bpb:
+                continue  # shortcut: only DXT1/3/5 seen streamed in RS; add others if a scene needs them
+            p = sec["offset"] + ob["offset"]
+            levels = []
+            for i in range(mips):
+                mw, mh = max(1, w >> i), max(1, h >> i)
+                sz = max(1, mw // 4) * max(1, mh // 4) * bpb
+                levels.append(struct.pack("<3I", mw, mh, sz) + stream[p:p + sz])
+                p += sz
+            assert p - sec["offset"] - ob["offset"] == ob["size"], name
+            assets["dxt"][name] = struct.pack("<6I", 2, fmt, 0, mips, w, h) + b"".join(levels[::-1])
     return sectors, headers, soi, stream, assets
 
 
@@ -86,9 +110,30 @@ def objects(sectors, headers, soi, stream):
             used[base] = k + 1
             data = stream[sec["offset"] + ob["offset"]:sec["offset"] + ob["offset"] + ob["size"]]
             try:
-                yield sec, ob, dxg.parse(soi[cands[k]:], data)
+                m = dxg.parse(soi[cands[k]:], data)
             except (dxg.DxgError, struct.error) as e:
                 yield sec, ob, e
+                continue
+            place = placement(soi, cands[k])
+            for i, n in enumerate(m["nodes"]):
+                if n["parent"] < 0 or n["parent"] == i:  # roots, as in dxg.world_matrices
+                    n["matrix"] = dxg.mat_mul(n["matrix"], place)
+            yield sec, ob, m
+
+
+def placement(soi, dgs):
+    """World matrix of a streamed object, from the 12 floats 60 bytes before its name record
+    (268 bytes before the dgs header): pos xyz, 1, look xyz, 1, up xyz, 1. Objects authored in
+    world space have pos 0 and look/up = Z/Y; instanced ones (Cozy Cone...) carry their placement
+    here, with the scale folded into the vector lengths."""
+    import math, scene
+    f = struct.unpack_from("<12f", soi, dgs - 328)
+    look, up = f[4:7], f[8:11]
+    # shortcut: the right axis has no stored length; using |look| is exact for uniform scale
+    # (all but 2 RS objects); revisit if a non-uniformly scaled object looks wrong
+    s = math.hypot(*look)
+    r = scene.norm(scene.cross(up, look))
+    return (r[0] * s, r[1] * s, r[2] * s, 0.0, *up, 0.0, *look, 0.0, *f[:3], 1.0)
 
 
 def material_layers(idx, assets, mat, near):
