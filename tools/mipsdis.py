@@ -148,8 +148,58 @@ def dis(w, pc):
     if op == 0x1C:
         return f"mmi 0x{w:08x}"
     if op == 0x12:
-        return f"cop2 0x{w:08x}"
+        return vu0(w)
+    if op == 0x36:
+        return f"lqc2 vf{rt}, {s16(w & 0xFFFF)}({R[rs]})"
+    if op == 0x3E:
+        return f"sqc2 vf{rt}, {s16(w & 0xFFFF)}({R[rs]})"
     return f".word 0x{w:08x}"
+
+
+# VU0 macro mode (COP2), EE Core manual: special1 by funct, special2 by (fd<<2)|bc
+_BC = "xyzw"
+_SP1 = {0x1c: "vmulq", 0x1d: "vmaxi", 0x1e: "vmuli", 0x1f: "vminii", 0x20: "vaddq", 0x21: "vmaddq",
+        0x22: "vaddi", 0x23: "vmaddi", 0x24: "vsubq", 0x25: "vmsubq", 0x26: "vsubi", 0x27: "vmsubi",
+        0x28: "vadd", 0x29: "vmadd", 0x2a: "vmul", 0x2b: "vmax", 0x2c: "vsub", 0x2d: "vmsub",
+        0x2e: "vopmsub", 0x2f: "vmini", 0x30: "viadd", 0x31: "visub", 0x32: "viaddi", 0x34: "viand",
+        0x35: "vior", 0x38: "vcallms", 0x39: "vcallmsr"}
+_SP1BC = ["vadd", "vsub", "vmadd", "vmsub", "vmax", "vmini", "vmul"]
+_SP2 = {0x10: "vitof0", 0x11: "vitof4", 0x12: "vitof12", 0x13: "vitof15", 0x14: "vftoi0", 0x15: "vftoi4",
+        0x16: "vftoi12", 0x17: "vftoi15", 0x1c: "vmulaq", 0x1d: "vabs", 0x1e: "vmulai", 0x1f: "vclipw",
+        0x20: "vaddaq", 0x21: "vmaddaq", 0x22: "vaddai", 0x23: "vmaddai", 0x24: "vsubaq", 0x25: "vmsubaq",
+        0x26: "vsubai", 0x27: "vmsubai", 0x28: "vadda", 0x29: "vmadda", 0x2a: "vmula", 0x2c: "vsuba",
+        0x2d: "vmsuba", 0x2e: "vopmula", 0x2f: "vnop", 0x30: "vmove", 0x31: "vmr32", 0x34: "vlqi",
+        0x35: "vsqi", 0x36: "vlqd", 0x37: "vsqd", 0x38: "vdiv", 0x39: "vsqrt", 0x3a: "vrsqrt",
+        0x3b: "vwaitq", 0x3c: "vmtir", 0x3d: "vmfir", 0x3e: "vilwr", 0x3f: "viswr"}
+_SP2BC = ["vadda", "vsuba", "vmadda", "vmsuba"]
+
+
+def vu0(w):
+    rs = (w >> 21) & 31
+    rt = (w >> 16) & 31
+    if not (w >> 25) & 1:
+        names = {1: "qmfc2", 2: "cfc2", 5: "qmtc2", 6: "ctc2"}
+        if rs in names:
+            return f"{names[rs]} {R[rt]}, vf{(w >> 11) & 31}"
+        return f"cop2 0x{w:08x}"
+    dest = "".join(c for i, c in enumerate("xyzw") if (w >> (24 - i)) & 1)
+    ft, fs, fd, fn = (w >> 16) & 31, (w >> 11) & 31, (w >> 6) & 31, w & 63
+    if fn < 0x3c:
+        if fn < 0x1c:
+            return f"{_SP1BC[fn >> 2]}{_BC[fn & 3]}.{dest} vf{fd}, vf{fs}, vf{ft}{_BC[fn & 3]}"
+        n = _SP1.get(fn)
+        return f"{n}.{dest} vf{fd}, vf{fs}, vf{ft}" if n else f"cop2 0x{w:08x}"
+    k = (fd << 2) | (fn & 3)
+    if k < 0x10:
+        return f"{_SP2BC[k >> 2]}{_BC[k & 3]}.{dest} ACC, vf{fs}, vf{ft}{_BC[k & 3]}"
+    if 0x18 <= k < 0x1c:
+        return f"vmula{_BC[k & 3]}.{dest} ACC, vf{fs}, vf{ft}{_BC[k & 3]}"
+    n = _SP2.get(k)
+    if n == "vdiv":
+        return f"vdiv Q, vf{fs}{_BC[(w >> 21) & 3]}, vf{ft}{_BC[(w >> 23) & 3]}"
+    if n in ("vsqrt", "vrsqrt"):
+        return f"{n} Q, vf{fs}{_BC[(w >> 21) & 3]}, vf{ft}{_BC[(w >> 23) & 3]}"
+    return f"{n}.{dest} vf{fs}, vf{ft}" if n else f"cop2 0x{w:08x}"
 
 
 def main():

@@ -286,10 +286,10 @@ static const CarParams MCQ_DEFAULTS = {
     .restitution = 0.2f, .body_friction = 0.2f, .yaw_rate_limit = 10, .normal_load_scale = 1,
     .handbrake_scale = 0.43f,
     .tire = {
-        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000 },
-        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000 },
-        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000 },
-        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000 },
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10 },
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10 },
     },
     .drivetrain = 1, .n_rpm = 8, .n_gears = 5,
     .rpm = { 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000 },
@@ -373,6 +373,7 @@ void car_params_parse(CarParams *p, const char *t)
         ini_f(t, TN[i], "MaxCompressionRate", &tp->max_comp_rate, 1);
         ini_f(t, TN[i], "TireRadius", &tp->radius, 1);
         ini_f(t, TN[i], "Spring", &tp->spring, 1);
+        ini_f(t, TN[i], "TireInertia", &tp->inertia, 1);
         ini_f(t, TN[i], "BounceDampingRatio", &tp->bounce_damp, 1);
         ini_f(t, TN[i], "ReboundDampingRatio", &tp->rebound_damp, 1);
         ini_f(t, TN[i], "MaxSteerAngle", &tp->max_steer, 1);
@@ -457,37 +458,34 @@ static const float PROBE[5][3] = { { 0, 1.6f, 4.2f }, { 0, 1.6f, -4.4f }, { 0, 1
                                    { -2.0f, 1.6f, 0 }, { 2.0f, 1.6f, 0 } };
 #define PROBE_R 1.3f
 
+/* The game's tyre curve (PS2 ELF 0x216028), tabulated in 64 steps; lookups lerp between
+   neighbouring entries like the game does (0x232a00). */
 static float curve(const TireCurve *c, float x)
 {
     float a = fabsf(c->round_off * c->speed_scale * x);
     return c->scale * c->speed_scale * x / (1.0f + powf(a, c->drop_off));
 }
 
-/* peak of the curve over x in [0, xmax] (the game tabulates 64 steps over that range) */
-static float curve_peak(const TireCurve *c, float xmax)
+static float table(const TireCurve *c, float x, float xmax)
 {
-    float best = 0;
-    for (int i = 1; i <= 64; i++)
-        best = fmaxf(best, curve(c, xmax * i / 64.0f));
-    return best;
+    float f = fabsf(x) / xmax * 64.0f;
+    int i = (int)f;
+    if (i >= 63)
+        return curve(c, xmax * 63 / 64.0f);
+    float a = curve(c, xmax * i / 64.0f), b = curve(c, xmax * (i + 1) / 64.0f);
+    return a + (b - a) * (f - i);
 }
 
 static float mass(const CarParams *p) { return p->weight / G_FT; }
-static float gravity(const CarParams *p) { return G_FT * p->gravity_scale; }
-static float front_share(const CarParams *p) { return (p->cofg[2] - WZ[2]) / (WZ[0] - WZ[2]); }
-static float static_load(const CarParams *p, int i)
+/* PS2 0x2305f0: k = 32.2 * Spring * mass (= Spring * Weight, lbf/ft, per wheel);
+   damping = 2 * ratio * sqrt(k * mass) with the whole car's mass */
+static float spring_k(const CarParams *p, int i) { return G_FT * p->tire[i].spring * mass(p); }
+/* wheel centre (= strut attach, the bind-pose wheel node) relative to the centre of mass */
+static void attach(const CarParams *p, int i, float o[3])
 {
-    float f = front_share(p);
-    return mass(p) * gravity(p) * (i < 2 ? f : 1 - f) * 0.5f;
-}
-/* shortcut: Spring is a "scale factor" with no stated base; read as load / MaxCompression,
-   so the static sag is MaxCompression / Spring. Upgrade once the PS2 vehicle code is decoded. */
-static float spring_k(const CarParams *p, int i) { return p->tire[i].spring * static_load(p, i) / p->tire[i].max_comp; }
-static float static_sag(const CarParams *p, int i) { return p->tire[i].max_comp / p->tire[i].spring; }
-static float mount_y(const CarParams *p, int i)
-{
-    /* wheel centre at its bind height when the strut sits at static sag */
-    return BIND_WHEEL_Y - p->cofg[1] + p->tire[i].max_comp - static_sag(p, i);
+    o[0] = WX[i] - p->cofg[0];
+    o[1] = BIND_WHEEL_Y - p->cofg[1];
+    o[2] = WZ[i] - p->cofg[2];
 }
 
 static void to_world(const Car *c, const float l[3], float o[3])
@@ -524,12 +522,14 @@ static float interp(const float *xs, const float *ys, int n, float x)
     return ys[n - 1];
 }
 
-/* Engine torque at the driven hubs (lb-ft, total), updating rpm and the automatic gearbox. */
+/* Engine torque at the driven hubs (lb-ft, total), updating rpm and the automatic gearbox.
+   shortcut: the PS2 engine (0x225810) couples engine and gearbox through a torque converter
+   (maxK, PumpTorqueScale, MaxPumpTorque, EngineInertia); this direct HP-curve drive stands in
+   until that model is decoded. */
 static float drivetrain(Car *c, float dt)
 {
     const CarParams *p = c->p;
-    float r = p->tire[2].radius;
-    float wheel = car_speed(c) / r;                   /* rad/s of the driven (rear) wheels */
+    float wheel = 0.5f * (c->omega[2] + c->omega[3]); /* driven wheels, as in PS2 0x225a10 */
     int reverse = c->gear < 0;
     float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
     float rpm = fabsf(wheel) * ratio * 60.0f / (2.0f * 3.14159265f);
@@ -569,41 +569,62 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
 {
     const CarParams *p = c->p;
     float *r = c->rot, *u = c->rot + 3, *f = c->rot + 6;
-    float m = mass(p), g = gravity(p);
-    float F[3] = { 0, -g * m, 0 }, T[3] = { 0, 0, 0 };
+    float m = mass(p);
+    float F[3] = { 0, -p->weight * p->gravity_scale, 0 }, T[3] = { 0, 0, 0 };
     int grounded = 0;
-    int driven_n = p->drivetrain == 1 ? 2 : (p->drivetrain == 2 ? 4 : 2);
+    int driven_n = p->drivetrain == 2 ? 4 : 2;
     for (int i = 0; i < 4; i++) {
         const TireParams *tp = &p->tire[i];
-        float lm[3] = { WX[i] - p->cofg[0], mount_y(p, i), WZ[i] - p->cofg[2] };
-        float pm[3], d[3] = { -u[0], -u[1], -u[2] }, t, n[3];
-        to_world(c, lm, pm);
-        float len = tp->max_comp + tp->radius;
-        if (!col_raycast(w, pm, d, len, &t, n)) {
+        int rear = i >= 2;
+        int driven = p->drivetrain == 2 || (p->drivetrain == 1 ? rear : !rear);
+        float R = tp->radius;
+
+        /* wheel spin (PS2 0x231e30 / 0x2326d0): drive + brake torque against the last
+           longitudinal force, over TireInertia; at most 293.3 rad/s */
+        float brake = (c->gear > 0 ? c->brake : 0);
+        if (rear && handbrake)
+            brake = 1;
+        float spin_sign = fmaxf(-1.0f, fminf(1.0f, 0.5f * c->omega[i]));
+        float torque = (driven ? hub_torque / driven_n : 0) - brake * tp->max_brake_torque * spin_sign;
+        c->omega[i] += (torque - c->fx_prev[i] * R) / tp->inertia * h;
+        c->omega[i] = fmaxf(-293.33f, fminf(293.33f, c->omega[i]));
+        c->spin[i] += c->omega[i] * h;
+
+        /* suspension (PS2 0x2317b0): ray from the bind-pose wheel centre down one tyre
+           radius; compression 0 at the bind pose */
+        float la[3], pm[3], d[3] = { -u[0], -u[1], -u[2] }, t, n[3];
+        attach(p, i, la);
+        to_world(c, la, pm);
+        if (!col_raycast(w, pm, d, R, &t, n)) {
             c->comp[i] = 0;
-            c->spin[i] += car_speed(c) / tp->radius * h * 0.98f;
+            c->fx_prev[i] = 0;
             continue;
         }
         grounded++;
-        float comp = len - t;
-        float vcomp = (comp - c->comp[i]) / h;
-        vcomp = fmaxf(-tp->max_comp_rate, fminf(tp->max_comp_rate, vcomp));
+        float comp = R - t;
+        float cp[3] = { pm[0] + d[0] * t, pm[1] + d[1] * t, pm[2] + d[2] * t }, rel[3], vc[3];
+        sub3(cp, c->pos, rel);
+        cross3(c->angvel, rel, vc);
+        madd(vc, c->vel, 1);
+        if (comp > tp->max_comp) {
+            /* bottomed out: push the body out and stop it moving into the ground */
+            madd(c->pos, n, fminf(comp - tp->max_comp, tp->max_comp));
+            float vn = dot3(c->vel, n);
+            if (vn < 0)
+                madd(c->vel, n, -vn);
+            comp = tp->max_comp;
+        }
+        float vs = fmaxf(-tp->max_comp_rate, fminf(tp->max_comp_rate, dot3(vc, n)));
+        float k = spring_k(p, i);
+        float damp = 2.0f * (vs > 0 ? tp->bounce_damp : tp->rebound_damp) * sqrtf(k * m);
+        float fn = fmaxf(0.0f, k * comp - damp * vs);
         c->comp[i] = comp;
-        float k = spring_k(p, i), ms = static_load(p, i) / g;
-        float zeta = vcomp > 0 ? tp->bounce_damp : tp->rebound_damp;
-        float fs = k * comp + zeta * 2.0f * sqrtf(k * ms) * vcomp;
-        if (comp > tp->max_comp)
-            fs += k * 20.0f * (comp - tp->max_comp); /* bump stop */
-        if (fs < 0)
-            fs = 0;
-        float cp[3] = { pm[0] + d[0] * t, pm[1] + d[1] * t, pm[2] + d[2] * t }, arm[3], tq[3], fv[3];
-        sub3(pm, c->pos, arm);
-        fv[0] = n[0] * fs; fv[1] = n[1] * fs; fv[2] = n[2] * fs;
+        float fv[3] = { n[0] * fn, n[1] * fn, n[2] * fn }, tq[3];
         madd(F, fv, 1);
-        cross3(arm, fv, tq);
+        cross3(rel, fv, tq);
         madd(T, tq, 1);
 
-        /* tyre frame on the ground plane */
+        /* tyre frame on the ground plane (PS2 0x232350) */
         float s = i < 2 ? c->steer : 0, cs = cosf(s), sn = sinf(s);
         float wf[3], ws[3];
         for (int k2 = 0; k2 < 3; k2++) {
@@ -614,51 +635,35 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         madd(ws, n, -dot3(ws, n));
         norm3(wf);
         norm3(ws);
-        float rel[3], vc[3];
-        sub3(cp, c->pos, rel);
-        cross3(c->angvel, rel, vc);
-        madd(vc, c->vel, 1);
-        float vf = dot3(vc, wf), vs = dot3(vc, ws);
-        float fn = fs * p->normal_load_scale;
-        float cap = ms / h;                           /* force that cancels the slip this step */
-        int rear = i >= 2;
+        float vz = dot3(vc, wf), vx = dot3(vc, ws), avz = fabsf(vz);
 
-        /* lateral: slip angle into the game's side-force curve (tabulated over 0..pi/2) */
-        float alpha = atan2f(fabsf(vs), fmaxf(fabsf(vf), 3.0f));
-        float fy = -(vs > 0 ? 1.0f : -1.0f) * curve(&tp->side, alpha) * fn;
-        if (rear && handbrake)
-            fy *= p->handbrake_scale;
-        if (fabsf(fy) > fabsf(vs) * cap)
-            fy = -vs * cap;
-
-        /* longitudinal: hub torques, limited by the drive-force curve (slip 0..1) */
-        int driven = p->drivetrain == 2 || (p->drivetrain == 1 ? rear : !rear);
-        float fx = driven ? hub_torque / driven_n / tp->radius : 0;
-        float brake = (c->gear > 0 ? c->brake : 0) * tp->max_brake_torque / tp->radius;
-        if (rear && handbrake)
-            brake = fmaxf(brake, tp->max_brake_torque / tp->radius);
-        fx -= fminf(brake, fabsf(vf) * cap) * (vf > 0 ? 1 : -1);
-        float peak = curve_peak(&tp->drive, 1.0f) * fn;
-        float slide = curve(&tp->drive, 1.0f) * fn;
-        int slipping = fabsf(fx) > peak;
-        if (slipping)
-            fx = (fx > 0 ? 1 : -1) * slide;
-        /* friction ellipse between the two curves' peaks */
-        float py = curve_peak(&tp->side, 1.5707963f) * fn;
-        float e = (py > 0 && peak > 0) ? (fx / peak) * (fx / peak) + (fy / py) * (fy / py) : 0;
-        if (e > 1) {
-            float sc = 1.0f / sqrtf(e);
-            fx *= sc;
-            fy *= sc;
+        /* slips (PS2 0x2326d0) */
+        float alpha;
+        if (avz > 20.0f) {
+            alpha = acosf(fminf(1.0f, avz / sqrtf(vx * vx + vz * vz))) * (vx < 0 ? -1.0f : 1.0f);
+            c->slip[i] = (vz - c->omega[i] * R) / avz;
+        } else {
+            alpha = 0.05f * vx;
+            c->slip[i] += h * 3.0f * (vz - avz * c->slip[i] - c->omega[i] * R);
         }
+        alpha = fmaxf(-1.5707963f, fminf(1.5707963f, alpha));
+        c->slip[i] = fmaxf(-0.98f, fminf(0.98f, c->slip[i]));
+
+        /* forces (PS2 0x232a00): independent curves, no friction circle; the lateral load
+           blends a quarter of the weight with the strut force by NormalLoadScale */
+        float fx = -(c->slip[i] > 0 ? 1.0f : -1.0f) * table(&tp->drive, c->slip[i], 1.0f) * fn;
+        float load = p->weight * 0.25f + (fn - p->weight * 0.25f) * p->normal_load_scale;
+        float fy = -(alpha > 0 ? 1.0f : -1.0f) * table(&tp->side, alpha * 0.99f, 1.5707963f) * load;
+        if (rear && handbrake)
+            fy *= p->handbrake_scale; /* shortcut: assumed to scale the rear lateral grip (the
+                                          vehicle code that sets the per-tyre scales is not decoded) */
+        c->fx_prev[i] = fx;
         float ft[3] = { 0, 0, 0 };
         madd(ft, wf, fx);
         madd(ft, ws, fy);
         madd(F, ft, 1);
-        sub3(cp, c->pos, arm);
-        cross3(arm, ft, tq);
+        cross3(rel, ft, tq);
         madd(T, tq, 1);
-        c->spin[i] += (slipping && driven ? (fx > 0 ? 1.5f : 0.0f) : 1.0f) * vf / tp->radius * h;
     }
     c->grounded = grounded;
     float sp = sqrtf(dot3(c->vel, c->vel));
@@ -755,7 +760,6 @@ void car_matrix(const Car *c, float out[16])
 
 float car_wheel_offset(const Car *c, int i)
 {
-    /* wheel centre below the mount: max_comp - comp (unloaded: full droop); bind is at static sag */
-    float travel = c->comp[i] > 0 ? fminf(c->comp[i], c->p->tire[i].max_comp) : 0;
-    return travel - static_sag(c->p, i);
+    /* compression is measured from the bind pose: the wheel rises by it */
+    return c->comp[i] > 0 ? fminf(c->comp[i], c->p->tire[i].max_comp) : 0;
 }

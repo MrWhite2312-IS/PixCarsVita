@@ -35,7 +35,7 @@ typedef struct { float round_off, drop_off, scale, speed_scale; } TireCurve;
 typedef struct {
     float max_comp, max_comp_rate, radius, spring, bounce_damp, rebound_damp, max_steer;
     TireCurve side, drive;     /* surface 1 */
-    float max_brake_torque;
+    float max_brake_torque, inertia;
 } TireParams;
 
 typedef struct {
@@ -71,6 +71,9 @@ typedef struct {
     float steer_in, gas, brake;/* rate-limited inputs */
     float comp[4];             /* suspension compression per wheel (FL, FR, RL, RR) */
     float spin[4];             /* wheel roll angle (rad) */
+    float omega[4];            /* wheel spin rate (rad/s) */
+    float slip[4];             /* longitudinal slip ratio (relaxed at low speed, as in the game) */
+    float fx_prev[4];          /* last longitudinal tyre force (lbf), loads the wheel spin */
     int gear;                  /* 1..n, -1 reverse */
     float rpm, shift_t;
     int grounded;

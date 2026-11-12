@@ -79,8 +79,10 @@ int main(int argc, char **argv)
     car_matrix(&c, M);
     printf("rest: model origin y=%.3f up=%.4f comp=%.3f/%.3f v=%.4f\n", M[13], c.rot[4], c.comp[0], c.comp[2], v);
     assert(c.grounded == 4 && c.rot[4] > 0.999f && v < 0.05f);
-    /* tyres (radius 1.4, centre at bind 0.96) on the plane: origin ~0.44 up */
-    assert(fabsf(M[13] - 0.44f) < 0.1f);
+    /* tyres (radius 1.4, centre at bind 0.96): origin 0.44 up at zero compression */
+    assert(M[13] > 0.1f && M[13] < 0.44f); /* below the bind height by the static compression */
+    /* PS2 suspension: k = Spring * Weight, so sag = GravityScale * axle share / 2 / Spring */
+    assert(fabsf(c.comp[0] - 1.2f * 0.5444f / 2 / 1.25f) < 0.01f && fabsf(c.comp[2] - 1.2f * 0.4556f / 2 / 1.45f) < 0.01f);
 
     float z0 = c.pos[2], t60 = -1, tt = 0;
     int max_gear = 1;
