@@ -94,28 +94,25 @@ static GLuint upload_texture(const VcmTexture *t)
     GLuint id;
     glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);
-    uint32_t w = t->width, h = t->height;
-    for (uint32_t l = 0; l < t->n_levels; l++) {
-        const VcmLevel *lv = &t->levels[l];
-        switch (t->format) {
-        case VCM_TEX_DXT1:
-            glCompressedTexImage2D(GL_TEXTURE_2D, l, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, w, h, 0, lv->size, lv->data);
-            break;
-        case VCM_TEX_DXT3:
-            glCompressedTexImage2D(GL_TEXTURE_2D, l, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, w, h, 0, lv->size, lv->data);
-            break;
-        case VCM_TEX_DXT5:
-            glCompressedTexImage2D(GL_TEXTURE_2D, l, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, w, h, 0, lv->size, lv->data);
-            break;
-        default:
-            glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, lv->data);
-            break;
-        }
-        w = w > 1 ? w / 2 : 1;
-        h = h > 1 ? h / 2 : 1;
+    /* shortcut: level 0 only; vitaGL crashes in gpu_alloc_compressed_texture when compressed
+       mip levels are uploaded (two core dumps). Upgrade: build mips the way vitaGL expects. */
+    const VcmLevel *lv = &t->levels[0];
+    GLsizei w = (GLsizei)t->width, h = (GLsizei)t->height;
+    switch (t->format) {
+    case VCM_TEX_DXT1:
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, w, h, 0, lv->size, lv->data);
+        break;
+    case VCM_TEX_DXT3:
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, w, h, 0, lv->size, lv->data);
+        break;
+    case VCM_TEX_DXT5:
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, w, h, 0, lv->size, lv->data);
+        break;
+    default:
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, lv->data);
+        break;
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                    t->n_levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     return id;
 }
