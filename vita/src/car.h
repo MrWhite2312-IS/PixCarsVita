@@ -44,6 +44,7 @@ typedef struct {
     TireParams tire[4];        /* FL, FR, RL, RR */
     int drivetrain, n_rpm, n_gears;
     float rpm[16], hp[16], gear[8], final_ratio, loss, min_rpm, engine_braking;
+    float engine_inertia, idle_throttle, max_k, pump_torque_scale, max_pump_torque;
     float low_rpm, low_up, low_down, high_rpm, high_up, high_down;
     float shift_up_time, shift_up_throttle, shift_down_time, shift_down_throttle;
     float aero_area, aero_drag;

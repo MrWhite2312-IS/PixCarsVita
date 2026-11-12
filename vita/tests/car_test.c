@@ -78,7 +78,8 @@ int main(int argc, char **argv)
     float M[16];
     car_matrix(&c, M);
     printf("rest: model origin y=%.3f up=%.4f comp=%.3f/%.3f v=%.4f\n", M[13], c.rot[4], c.comp[0], c.comp[2], v);
-    assert(c.grounded == 4 && c.rot[4] > 0.999f && v < 0.05f);
+    /* automatic box: IdleThrottle through the torque converter creeps the car (~1-2 ft/s) */
+    assert(c.grounded == 4 && c.rot[4] > 0.999f && v < 3.0f);
     /* tyres (radius 1.4, centre at bind 0.96): origin 0.44 up at zero compression */
     assert(M[13] > 0.1f && M[13] < 0.44f); /* below the bind height by the static compression */
     /* PS2 suspension: k = Spring * Weight, so sag = GravityScale * axle share / 2 / Spring */

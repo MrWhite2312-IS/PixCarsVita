@@ -295,7 +295,8 @@ static const CarParams MCQ_DEFAULTS = {
     .rpm = { 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000 },
     .hp = { 0, 115, 225, 325, 435, 495, 540, 495 },
     .gear = { 6, 3.2f, 2.4f, 1.7f, 1.7f }, .final_ratio = 1.95f, .loss = 18, .min_rpm = 100,
-    .engine_braking = 10,
+    .engine_braking = 10, .engine_inertia = 0.2f, .idle_throttle = 0.01f,
+    .max_k = 2.5f, .pump_torque_scale = 0.1f, .max_pump_torque = 1000,
     .low_rpm = 1000, .low_up = 5500, .low_down = 2000, .high_rpm = 1500, .high_up = 6700, .high_down = 4500,
     .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
     .aero_area = 35, .aero_drag = 0.3f,
@@ -410,6 +411,11 @@ void car_params_parse(CarParams *p, const char *t)
     ini_f(t, E, "TransmissionLoss", &p->loss, 1);
     ini_f(t, E, "MinRPM", &p->min_rpm, 1);
     ini_f(t, E, "EngineBraking", &p->engine_braking, 1);
+    ini_f(t, E, "EngineInertia", &p->engine_inertia, 1);
+    ini_f(t, E, "IdleThrottle", &p->idle_throttle, 1);
+    ini_f(t, E, "MaxK", &p->max_k, 1);
+    ini_f(t, E, "PumpTorqueScale", &p->pump_torque_scale, 1);
+    ini_f(t, E, "MaxPumpTorque", &p->max_pump_torque, 1);
     ini_f(t, E, "LowLoadRPM", &p->low_rpm, 1);
     ini_f(t, E, "LowLoadUpShiftRPM", &p->low_up, 1);
     ini_f(t, E, "LowLoadDownShiftRPM", &p->low_down, 1);
@@ -447,6 +453,7 @@ void car_params_parse(CarParams *p, const char *t)
 #define G_FT 32.174f         /* ft/s^2; weights are in pounds, forces in lbf, mass in slugs */
 #define RHO_AIR 0.00238f     /* slug/ft^3, sea level */
 #define MPH 0.681818f        /* mph per ft/s */
+#define RPM_PER_RADS 9.5492966f
 #define BIND_WHEEL_Y 0.96f   /* wheel centre height in McQueen's bind pose (wheel*_root nodes) */
 
 static const float WX[4] = { -2.43f, 2.43f, -2.69f, 2.69f };
@@ -522,27 +529,44 @@ static float interp(const float *xs, const float *ys, int n, float x)
     return ys[n - 1];
 }
 
-/* Engine torque at the driven hubs (lb-ft, total), updating rpm and the automatic gearbox.
-   shortcut: the PS2 engine (0x225810) couples engine and gearbox through a torque converter
-   (maxK, PumpTorqueScale, MaxPumpTorque, EngineInertia); this direct HP-curve drive stands in
-   until that model is decoded. */
+/* Engine and torque converter as the PS2 game runs them (0x225810; setters 0x2250a0-0x2253a0).
+   Returns the hub torque summed over the driven wheels (lb-ft); updates rpm and the gearbox. */
 static float drivetrain(Car *c, float dt)
 {
     const CarParams *p = c->p;
-    float wheel = 0.5f * (c->omega[2] + c->omega[3]); /* driven wheels, as in PS2 0x225a10 */
     int reverse = c->gear < 0;
+    float dir = reverse ? -1.0f : 1.0f;
     float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
-    float rpm = fabsf(wheel) * ratio * 60.0f / (2.0f * 3.14159265f);
     float load = reverse ? c->brake : c->gas;
     int high = load > 0.5f;
-    /* automatic shifts at the game's load-dependent RPMs */
+    if (c->rpm < p->min_rpm)
+        c->rpm = p->min_rpm;
+
+    /* gearbox side: driven wheels' average spin through the current ratio (rad/s -> rpm) */
+    float w = 0.5f * (c->omega[2] + c->omega[3]) * dir;
+    float trans = RPM_PER_RADS * ratio * w;
+    float slip = trans < 0 ? c->rpm : c->rpm - trans;
+    /* pump torque k * slip^2 (k = PumpTorqueScale / 1000), limited to MaxPumpTorque */
+    float k = p->pump_torque_scale * 0.001f;
+    float pump = (slip < 0 ? -k : k) * slip * slip;
+    pump = fmaxf(-p->max_pump_torque, fminf(p->max_pump_torque, pump));
+    /* torque multiplication: maxK at stall, 1 when the turbine catches the engine */
+    float mult = (c->rpm > trans && c->rpm > 0 && trans > 0)
+                 ? p->max_k + (1.0f - p->max_k) * trans / c->rpm : p->max_k;
+    float out = pump * mult;
+
+    /* automatic shifts at the load-dependent RPMs (shortcut: the PS2 shift scheduler is not
+       decoded; this uses the .phy thresholds on engine rpm with the shift durations) */
     if (!reverse && c->shift_t <= 0) {
-        if (rpm > (high ? p->high_up : p->low_up) && c->gear < p->n_gears) {
+        float up = high ? p->high_up : p->low_up, down = high ? p->high_down : p->low_down;
+        /* turbine rpm the next lower gear would give: only drop if it stays under the up point */
+        float lower = c->gear > 1 ? trans * p->gear[c->gear - 2] / p->gear[c->gear - 1] : 0;
+        if (c->rpm > up && c->gear < p->n_gears) {
             c->gear++;
             c->shift_t = p->shift_up_time;
-        } else if (rpm < (high ? p->high_down : p->low_down) && c->gear > 1) {
+        } else if (c->rpm < down && c->gear > 1 && lower < up * 0.9f) {
             c->gear--;
-            c->shift_t = -p->shift_down_time; /* negative: downshift in progress */
+            c->shift_t = -p->shift_down_time;
         }
     }
     float shift_scale = 1;
@@ -553,16 +577,22 @@ static float drivetrain(Car *c, float dt)
         shift_scale = p->shift_down_throttle;
         c->shift_t = fminf(0, c->shift_t + dt);
     }
-    /* clutch slip below the load RPM lets the car launch */
-    float rpm_eff = fmaxf(rpm, load > 0 ? (high ? p->high_rpm : p->low_rpm) : p->min_rpm);
-    c->rpm = rpm_eff;
-    float torque = 0;
-    if (load > 0 && rpm_eff < p->rpm[p->n_rpm - 1])
-        torque = interp(p->rpm, p->hp, p->n_rpm, rpm_eff) * 5252.0f / rpm_eff * load * shift_scale;
-    else if (load <= 0)
-        torque = -p->engine_braking * (wheel > 0 ? 1 : -1) * (fabsf(wheel) > 0.5f);
-    float hub = torque * ratio * (1.0f - p->loss / 100.0f);
-    return reverse ? -hub : hub;
+
+    /* engine torque: gross curve (5252 HP / rpm + friction) times throttle (plus IdleThrottle),
+       minus friction EngineBraking * 1e-6 * rpm^2 */
+    float fr = p->engine_braking * 1e-6f;
+    float rpm = c->rpm;
+    float gross = interp(p->rpm, p->hp, p->n_rpm, rpm) * 5252.0f / fmaxf(rpm, 1.0f) + fr * rpm * rpm;
+    float te = gross * fminf(load * shift_scale + p->idle_throttle, 1.0f) - fr * rpm * rpm;
+    /* engine speed, implicit in the pump torque's slope */
+    float inv_i = 1.0f / p->engine_inertia;
+    float denom = 1.0f + dt * k * fabsf(slip) * inv_i;
+    c->rpm += RPM_PER_RADS * dt * (te - pump) * inv_i / denom;
+    c->rpm = fmaxf(p->min_rpm, fminf(p->rpm[p->n_rpm - 1], c->rpm));
+
+    /* to each driven wheel: ratio, transmission loss, half the axle, at most 5000 lb-ft */
+    float wheel = fmaxf(-5000.0f, fminf(5000.0f, out * ratio * (1.0f - p->loss / 100.0f) * 0.5f));
+    return 2.0f * wheel * dir;
 }
 
 static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, float h)
