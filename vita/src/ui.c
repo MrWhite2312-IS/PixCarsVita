@@ -243,7 +243,8 @@ static void draw_item(const Ui *ui, const UiItem *it, float dx, float size, floa
         ui_text(ui, it->font, ui_str(ui, it->id), it->x + dx, it->y, it->scale, c, it->hj, it->vj);
         return;
     }
-    float w = (size > 0 ? size : it->w) * SX, h = (size > 0 ? size : it->h) * SY;
+    /* a sized icon (the red circle) scales by SY both ways so it stays round on 16:9, like the signs */
+    float w = size > 0 ? size * SY : it->w * SX, h = (size > 0 ? size : it->h) * SY;
     float x = (it->x + dx) * SX - w * it->hj * 0.5f, y = it->y * SY - h * it->vj * 0.5f;
     quad(ui->gl_tex[it->tex], x, y, w, h, it->u0, it->v0, it->u1, it->v1, c);
 }
@@ -269,13 +270,25 @@ void ui_draw_background(const Ui *ui, float p, float header_t)
     float circle = b < g[3] ? b / g[3] * g[1] : g[1] - (b - g[3]) / (1 - g[3]) * (g[1] - g[2]);
     /* title: fades in while sliding TitleX1 -> TitleX2 (80%) -> TitleX3 */
     float tx = p <= 0.8f ? g[5] - p * (g[5] - g[6]) / 0.8f : g[6] + (p - 0.8f) * (g[7] - g[6]) / 0.2f;
+    /* Pass 1: HeaderBackground first. The .lyr lists it after Header1..3, but header_bar_blue is
+       opaque where the strips sit, so in list order it would hide the checks. */
+    for (int i = 0; i < ui->n_item; i++) {
+        const UiItem *it = &ui->item[i];
+        if (l < 0 || it->layer != l)
+            continue;
+        if (!strcmp(it->name, "HeaderBackground"))
+            draw_item(ui, it, 640.0f * (1 - a), 0, 1);
+    }
+    /* Pass 2: everything else in file order. */
     for (int i = 0; i < ui->n_item; i++) {
         const UiItem *it = &ui->item[i];
         if (l < 0 || it->layer != l)
             continue;
         const char *n = it->name;
-        if (!strncmp(n, "Header", 6))          /* Header1..3, HeaderBackground: slide in from the right */
-            draw_item(ui, it, 640.0f * (1 - a) - (n[6] != 'B' ? hs : 0), 0, 1);
+        if (!strcmp(n, "HeaderBackground"))
+            continue;                          /* already drawn */
+        if (!strncmp(n, "Header", 6))          /* Header1..3: slide in from the right */
+            draw_item(ui, it, 640.0f * (1 - a) - hs, 0, 1);
         else if (!strncmp(n, "Footer", 6))     /* FooterLeft/Middle/Right: from the left */
             draw_item(ui, it, -640.0f * (1 - a), 0, 1);
         else if (!strcmp(n, "Red_Circle"))
