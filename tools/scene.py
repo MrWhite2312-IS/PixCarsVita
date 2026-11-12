@@ -51,6 +51,56 @@ def placement_matrix(pos, look=(0, 0, 1), up=(0, 1, 0)):
             pos[0], pos[1], pos[2], 1.0)
 
 
+def lights(idx, key):
+    """The scene's [LightN] and [Fog] (colours 0..1, may be negative): {'ambient': rgb,
+    'dir': [(L toward the light, rgb)], 'spot': [(pos, look, inner_deg, outer_deg, att, range, rgb)],
+    'fog': (rgb, min, max) or None}. The game lights every object with ambient + 3 directional
+    lights (vertex shader DXVAnimSkin4Diffuse / DXVDiffuse)."""
+    secs = dxm.parse_ini(idx.read(key).decode("latin-1"))
+    out = {"ambient": (0.0, 0.0, 0.0), "dir": [], "spot": [], "fog": None}
+
+    def rgb(kv, k="colorrgb"):
+        return tuple(float(x) / 255.0 for x in kv[k][1].split(",")[:3]) if k in kv else (0.0, 0.0, 0.0)
+
+    for sec, kv in secs:
+        s = sec.lower()
+        if s == "fog" and "colorrgb" in kv:
+            out["fog"] = (rgb(kv), float(kv.get("minimumfogdistance", ("", "0"))[1]),
+                          float(kv.get("maximumfogdistance", ("", "0"))[1]))
+        if not (s.startswith("light") and s[5:].isdigit()):
+            continue
+        try:
+            add_light(out, kv, rgb)
+        except ValueError:  # a malformed value in the .scn (cd.scn has "52604'7"): skip it
+            pass
+    return out
+
+
+def add_light(out, kv, rgb):
+    if True:
+        typ = kv.get("type", ("", ""))[1].strip().strip('"').lower()
+        if kv.get("initialzone", ("", "1"))[1].strip() != "1":
+            return  # zone 1 is the open world; other zones (interiors) have their own lights
+        if kv.get("emitslight", ("", "1"))[1].strip().upper() in ("0", "F", "FALSE"):
+            return
+        if typ == "ambient":
+            out["ambient"] = tuple(a + b for a, b in zip(out["ambient"], rgb(kv)))
+        elif typ == "directional":
+            if "direction" in kv:
+                d = norm(vec(kv["direction"][1]))
+            else:
+                p, t = vec(kv["position"][1]), vec(kv["targetposition"][1])
+                d = norm(tuple(b - a for a, b in zip(p, t)))
+            out["dir"].append((tuple(-c for c in d), rgb(kv)))
+        elif typ in ("spotlight", "objectpoint"):
+            att = vec(kv["attenuation"][1]) if "attenuation" in kv else (1.0, 0.0, 0.0)
+            look = norm(vec(kv["lookvector"][1])) if "lookvector" in kv else (0.0, -1.0, 0.0)
+            out["spot"].append((vec(kv["position"][1]), look,
+                                float(kv.get("innerconeangle", ("", "360"))[1]),
+                                float(kv.get("outerconeangle", ("", "360"))[1]), att,
+                                float(kv.get("range", ("", "0"))[1]), rgb(kv)))
+
+
 def instances(idx, key):
     """[(mesh_key, world_matrix, name)] for every placed static mesh."""
     secs = dxm.parse_ini(idx.read(key).decode("latin-1"))

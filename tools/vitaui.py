@@ -37,8 +37,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
 BS = "\\"
 LANG = "spa"
-FONTS = ["24pt_franklincond_stroke", "22pt_antique_olive_stroke", "22pt_antique_olive_stroke_title"]
-LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MenuDescription", "MainMenuSigns"]
+FONTS = ["24pt_franklincond_stroke", "22pt_antique_olive_stroke", "22pt_antique_olive_stroke_title",
+         "48pt_bullet_stroke"]  # the last: HudSpeedometerFont
+LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MenuDescription", "MainMenuSigns",
+          "SpeedometerOverlay", "ExploreMap"]
+# in-game HUD layers take their style:: names from carsingame.sty, the rest from carsfrontendui.sty
+INGAME_LAYERS = {"SpeedometerOverlay", "ExploreMap"}
 # the main menu picks its description by the selected item's name (PS2 0x2828a0); the PC's
 # Quit Game has none
 SIGN_DESC = {"Story Mode": "STR_STORY_MODE_DESC", "Arcade Mode": "STR_ARCADE_MODE_DESC",
@@ -50,7 +54,8 @@ EXTRA_TEX = ["highlight_arrow",  # drawn by the sign menu's HighlightArrows effe
 # strings drift apart. (first name index, string offset) pairs checked by hand against the
 # text; names past the last checked range are not exported.
 # shortcut: only the ranges the front end uses are verified; extend when more text is needed.
-ALIGN = {"CarsFrontEndUI": [(0, 0, 72), (582, 5, 589)], "BXCarsFrontEndUI": [(0, 0, 46), (66, 3, 67)]}
+ALIGN = {"CarsFrontEndUI": [(0, 0, 72), (582, 5, 589)], "BXCarsFrontEndUI": [(0, 0, 46), (66, 3, 67)],
+         "InGameUI": [(34, 0, 42)]}  # MpH, KpH, the two placeholders, R(everse), SI, NO, YA
 
 
 def strings(idx, table):
@@ -132,8 +137,9 @@ def main():
     os.makedirs(out, exist_ok=True)
     idx = dxm.AssetIndex(DATA)
     ui = f"data{BS}ui{BS}"
-    sty = ini(idx.read(ui + "carsfrontendui.sty").decode("latin-1"))
-    style = {k.lower(): v for k, v in sty.items()}
+    fe_style = {k.lower(): v for k, v in ini(idx.read(ui + "carsfrontendui.sty").decode("latin-1")).items()}
+    ig_style = {k.lower(): v for k, v in ini(idx.read(ui + "carsingame.sty").decode("latin-1")).items()}
+    style = fe_style
 
     def color(v, default=(255, 255, 255, 255)):
         if not v:
@@ -189,12 +195,20 @@ def main():
                  ("finalcirclescale", 2.0), ("circlegrowingratio", 0.8), ("headeranimationspeed", 1.0),
                  ("titlex1", 400), ("titlex2", 20), ("titlex3", 55))]
             lines.append("bg " + " ".join(f"{v:g}" for v in g))
-        for comp in lyr["Root"].get("component*", []):
+        style = ig_style if layer in INGAME_LAYERS else fe_style
+        # a UIContainer's children are placed relative to its X/Y (SpeedometerOverlay's
+        # "Speedometer Digital" at 487,360)
+        todo = [(c, 0.0, 0.0) for c in lyr["Root"].get("component*", [])]
+        while todo:
+            comp, ox, oy = todo.pop(0)
             kv = dict(lyr.get(comp, {}))
-            kv.update(lyt.get(comp, {}))
+            kv.update({k: v for k, v in lyt.get(comp, {}).items()})
             typ = kv.get("type", "")
             cname = comp.replace(" ", "_")
-            x, y = float(kv.get("x", 0)), float(kv.get("y", 0))
+            x, y = ox + float(kv.get("x", 0)), oy + float(kv.get("y", 0))
+            if typ == "UIContainer":
+                todo[0:0] = [(c, x, y) for c in lyr.get(comp, {}).get("component*", [])]
+                continue
             hj = {"left": 0, "center": 1, "right": 2}[kv.get("horizontal_justification", "left").lower()]
             vj = {"top": 0, "center": 1, "bottom": 2}[kv.get("vertical_justification", "top").lower()]
             if typ == "UIIconComponent":
@@ -245,7 +259,8 @@ def main():
     bm = ini(idx.read(ui + "boostmeteroverlay.lyr").decode("latin-1"))
     lines.append("boostlen " + " ".join(x.strip() for x in bm["General"]["boostlevellengths"].split(",")))
     # dynamic texts the code fills in, plus the texts the layers name
-    used |= {"STR_START", "STR_MAIN_MENU", "STR_SELECT"}
+    used |= {"STR_START", "STR_MAIN_MENU", "STR_SELECT",
+             "STR_SPEED_UNITS_MPH", "STR_SPEED_UNITS_KPH"}  # the speedometer's units (PS2 0x22ee80)
     for k in sorted(used):
         if k in text and not k.startswith("STR_DYN_"):  # placeholders the code fills
             lines.append(f"str {k} {text[k]}")

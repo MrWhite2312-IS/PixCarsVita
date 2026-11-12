@@ -36,6 +36,7 @@ typedef struct {
     float max_comp, max_comp_rate, radius, spring, bounce_damp, rebound_damp, max_steer;
     TireCurve side, drive;     /* surface 1 */
     float max_brake_torque, inertia;
+    float max_decomp_rate;     /* MaxDecompressionRate: how fast the wheel may drop (ft/s) */
 } TireParams;
 
 typedef struct {
@@ -100,6 +101,8 @@ typedef struct {
     int gear;                  /* 1..n, -1 reverse */
     float rpm, shift_t, shift_cool;
     int grounded;              /* wheels on the ground */
+    int contact[4];            /* per wheel: touching the ground (tyre +0x1aa bit 2) */
+    float gnormal[4][3];       /* per wheel: ground normal at the contact (tyre +0x120) */
     /* controls, in the PS2 vehicle's terms (offsets of CarsVehiclePhysics) */
     float x, x_prev, y, xf, yf;/* stick +1628/1632/1636, filtered +1640/1644 */
     int digital;               /* steering from the d-pad (+1015 bit 3) */

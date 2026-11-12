@@ -414,3 +414,101 @@ void ui_draw_boost_meter(const Ui *ui, float length, float fill)
              0, 0, fill, 1, full);                                                   /* Boost Gradient */
 #undef R
 }
+
+static const UiItem *find_item(const Ui *ui, const char *name)
+{
+    for (int i = 0; i < ui->n_item; i++)
+        if (!strcmp(ui->item[i].name, name))
+            return &ui->item[i];
+    return NULL;
+}
+
+/* a component of a HUD cluster anchored at (ax, ay) in UI space: the anchor follows the 16:9
+   stretch, the cluster keeps the 4:3 proportions (the PC game only runs 4:3 modes) */
+static void draw_anchored(const Ui *ui, const char *name, float ax)
+{
+    const UiItem *it = find_item(ui, name);
+    if (!it)
+        return;
+    UiItem c = *it;
+    c.x = ax + (it->x - ax) * SY / SX;
+    draw_item(ui, &c, 0, 0, 1);
+}
+
+#define SPEEDO_X 487.0f /* SpeedometerOverlay.lyt: the "Speedometer Digital" container's X */
+
+void ui_draw_speedometer(Ui *ui, float speed, int kph, int reverse)
+{
+    if (reverse) {
+        /* 0x3b0110: the digits and units hidden, the Reverse text shown */
+        draw_anchored(ui, "Reverse", SPEEDO_X);
+        return;
+    }
+    /* 0x3b01b0: the profile's units (global +796 +128: 0 mph, 1 km/h); the PS2 uses 1.08 for
+       ft/s -> km/h, not 1.09728 */
+    speed *= kph ? 1.08f : 0.681818f;
+    int v = (int)floorf(speed + 0.5f);
+    int ones = v % 10, tens = v / 10 % 10, hundreds = v / 100 % 10;
+    char d[3][4] = { "", "", "" };
+    if (hundreds)
+        snprintf(d[0], sizeof d[0], "%d", hundreds);
+    if (hundreds || tens)
+        snprintf(d[1], sizeof d[1], "%d", tens);
+    snprintf(d[2], sizeof d[2], "%d", ones);
+    ui_set_str(ui, "STR_DYN_SPEED1_DIGIT1", d[0]);
+    ui_set_str(ui, "STR_DYN_SPEED1_DIGIT2", d[1]);
+    ui_set_str(ui, "STR_DYN_SPEED1_DIGIT3", d[2]);
+    /* 0x22ee80: the units text is STR_SPEED_UNITS_MPH or _KPH */
+    ui_set_str(ui, "STR_SPEED_UNITS", ui_str(ui, kph ? "STR_SPEED_UNITS_KPH" : "STR_SPEED_UNITS_MPH"));
+    draw_anchored(ui, "Speedometer_text1", SPEEDO_X);
+    draw_anchored(ui, "Speedometer_text2", SPEEDO_X);
+    draw_anchored(ui, "Speedometer_text3", SPEEDO_X);
+    draw_anchored(ui, "Speedometer_text_units", SPEEDO_X);
+}
+
+/* an icon component centred at (x, y) in UI space, turned by angle (radians, clockwise on
+   screen); it keeps its proportions on 16:9 (SY both ways) so the round compass stays round */
+static void draw_icon_rot(const Ui *ui, const UiItem *it, float x, float y, float angle)
+{
+    float w = it->w * SY * 0.5f, h = it->h * SY * 0.5f, c = cosf(angle), s = sinf(angle);
+    float cx = x * SX, cy = y * SY;
+    const float lx[4] = { -w, w, -w, w }, ly[4] = { -h, -h, h, h };
+    float v[8];
+    for (int i = 0; i < 4; i++) {
+        v[i * 2] = cx + lx[i] * c - ly[i] * s;
+        v[i * 2 + 1] = cy + lx[i] * s + ly[i] * c;
+    }
+    const float t[8] = { it->u0, it->v0, it->u1, it->v0, it->u0, it->v1, it->u1, it->v1 };
+    glBindTexture(GL_TEXTURE_2D, ui->gl_tex[it->tex]);
+    glColor4ub(it->rgba[0], it->rgba[1], it->rgba[2], it->rgba[3]);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, v);
+    glTexCoordPointer(2, GL_FLOAT, 0, t);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+void ui_draw_compass(const Ui *ui, float heading)
+{
+    /* CarsUIMapContainer (constructor 0x3abcc0): centre at the Marker's X/Y (0x3ac320), ring
+       radius 50, north arrow 10 beyond it, radar range 2500 ft; ExploreMap.lyr says only the
+       radar dot's size is read from the file */
+    const UiItem *marker = find_item(ui, "Marker"), *ring = find_item(ui, "RingFrame"),
+                 *fill = find_item(ui, "CompassFill"), *north = find_item(ui, "NorthArrow");
+    if (!marker || !ring || !fill || !north)
+        return;
+    const float cx = marker->x, cy = marker->y, radius = 50, arrow_out = 10;
+    /* draw order of the layer's Root */
+    draw_icon_rot(ui, marker, cx, cy, 0);
+    draw_icon_rot(ui, ring, cx, cy, 0);
+    draw_icon_rot(ui, fill, cx, cy, 0);
+    /* 0x3acae0: a = wrap(-heading - pi); the arrow sits at (cos a, -sin a) * (radius + 10)
+       from the centre (the 6000-entry cos/sin table, 0x137fb0) and turns by the heading */
+    float a = -heading - 3.14159265f;
+    float r = (radius + arrow_out) * SY / SX; /* x is stretched by SX below: keep the circle round */
+    draw_icon_rot(ui, north, cx + r * cosf(a), cy - (radius + arrow_out) * sinf(a), heading);
+    /* shortcut: the radar dots (one per nearby event/activity within 2500 ft, 0x3ad280) wait
+       for the explore mode's activities */
+}

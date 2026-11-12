@@ -289,10 +289,10 @@ static const CarParams MCQ_DEFAULTS = {
     .restitution = 0.2f, .body_friction = 0.2f, .yaw_rate_limit = 10, .normal_load_scale = 1,
     .handbrake_scale = 0.43f,
     .tire = {
-        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10 },
-        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10 },
-        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10 },
-        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10 },
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10, 8 },
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000, 10, 8 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10, 8 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000, 10, 8 },
     },
     .drivetrain = 1, .n_rpm = 8, .n_gears = 5,
     .rpm = { 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000 },
@@ -419,6 +419,7 @@ void car_params_parse(CarParams *p, const char *t)
             char s[64];
             ini_f(t, TN[i], "MaxCompression", &tp->max_comp, 1);
             ini_f(t, TN[i], "MaxCompressionRate", &tp->max_comp_rate, 1);
+            ini_f(t, TN[i], "MaxDecompressionRate", &tp->max_decomp_rate, 1);
             ini_f(t, TN[i], "TireRadius", &tp->radius, 1);
             ini_f(t, TN[i], "Spring", &tp->spring, 1);
             ini_f(t, TN[i], "TireInertia", &tp->inertia, 1);
@@ -562,14 +563,21 @@ static float curve(const TireCurve *c, float x)
     return c->scale * c->speed_scale * x / (1.0f + powf(a, c->drop_off));
 }
 
-static float table(const TireCurve *c, float x, float xmax)
+/* 0x232a00's lookup: the entry index comes from |x| (times idx_scale, capped at 0.99 for the side
+   table), but the lerp uses the signed x, clamped to the two entries. So a negative x does not
+   interpolate: it stays on entry i. */
+static float table(const TireCurve *c, float x, float xmax, float idx_scale)
 {
-    float f = fabsf(x) / xmax * 64.0f;
-    int i = (int)f;
+    float u = fabsf(x) / xmax * idx_scale;
+    if (idx_scale < 1.0f)
+        u = fminf(u, 0.99f);
+    int i = (int)(u * 64.0f);
+    float a = curve(c, xmax * i / 64.0f);
     if (i >= 63)
-        return curve(c, xmax * 63 / 64.0f);
-    float a = curve(c, xmax * i / 64.0f), b = curve(c, xmax * (i + 1) / 64.0f);
-    return a + (b - a) * (f - i);
+        return a;
+    float x0 = xmax * i / 64.0f, x1 = xmax * (i + 1) / 64.0f, b = curve(c, x1);
+    float v = a + (x - x0) / (x1 - x0) * (b - a);
+    return fmaxf(fminf(a, b), fminf(fmaxf(a, b), v));
 }
 
 static float mass(const CarParams *p) { return p->weight / G_FT; }
@@ -674,8 +682,15 @@ static float drivetrain(Car *c, float dt)
         if (driven_wheel(c, i))
             w += c->omega[i], nd++;
     w = (nd ? w / nd : 0) * dir;
+    /* 0x225810: the clutch opens during a gear change (ShiftUp/DownDuration) and while the
+       brake is on, except in top gear; then the engine turns free and drives nothing */
+    int clutch = !((c->shift_t != 0 || c->brake > 0) && !(c->gear == p->n_gears && !reverse));
     float trans = c->burn_hold ? 0 : RPM_PER_RADS * ratio * w;
     float slip = trans < 0 ? c->rpm : c->rpm - trans;
+    if (!clutch) {
+        trans = c->rpm;
+        slip = 0;
+    }
     /* pump torque k * slip^2 (k = PumpTorqueScale / 1000), limited to MaxPumpTorque */
     float k = p->pump_torque_scale * 0.001f;
     float pump = (slip < 0 ? -k : k) * slip * slip;
@@ -683,10 +698,10 @@ static float drivetrain(Car *c, float dt)
     /* torque multiplication: maxK at stall, 1 when the turbine catches the engine */
     float mult = (c->rpm > trans && c->rpm > 0 && trans > 0)
                  ? p->max_k + (1.0f - p->max_k) * trans / c->rpm : p->max_k;
-    float out = pump * mult * c->torque_scale; /* +232: WheelStandTorqueScale */
+    float out = pump * mult;
     if (ratio > 0 && w > 0)
         out *= c->boost; /* engine +104: the powerslide torque scale */
-    if (c->burn_hold)
+    if (c->burn_hold || !clutch)
         out = 0;
 
     /* automatic gearbox (PS2 0x225540): load = converter slip between Low/HighLoadRPM; shift
@@ -696,9 +711,14 @@ static float drivetrain(Car *c, float dt)
     lt = fmaxf(0.0f, fminf(1.0f, lt));
     float up = p->low_up + (p->high_up - p->low_up) * lt;
     float down = p->low_down + (p->high_down - p->low_down) * lt;
-    if (c->shift_cool > 0)
+    int touching = 0; /* 0x225540: no shifting with both driven wheels in the air */
+    for (int i = 0; i < 4; i++)
+        touching |= driven_wheel(c, i) && c->contact[i];
+    if (!touching || reverse)
+        ;
+    else if (c->shift_cool > 0)
         c->shift_cool -= dt;
-    else if (!reverse && c->brake <= 0) {
+    else if (c->brake <= 0) {
         if (c->rpm > up && c->gear < p->n_gears) {
             c->gear++;
             c->shift_t = p->shift_up_time;
@@ -748,11 +768,13 @@ static float drivetrain(Car *c, float dt)
     float inv_i = 1.0f / p->engine_inertia;
     float denom = 1.0f + dt * k * fabsf(slip) * inv_i;
     c->rpm += RPM_PER_RADS * dt * (te - pump) * inv_i / denom;
-    c->rpm = fmaxf(p->min_rpm, fminf(p->rpm[p->n_rpm - 1], c->rpm));
+    /* rev limit: the last RPM point, 9000 while NOX burns */
+    c->rpm = fmaxf(p->min_rpm, fminf(c->nox_on ? 9000.0f : p->rpm[p->n_rpm - 1], c->rpm));
 
-    /* to each driven wheel: ratio, transmission loss, half the axle, at most 5000 lb-ft */
+    /* to each driven wheel: ratio, transmission loss, half the axle, at most 5000 lb-ft, then
+       the WheelStandTorqueScale (+232; engine +0xe8 is applied after the limit) */
     float wheel = fmaxf(-5000.0f, fminf(5000.0f, out * ratio * (1.0f - p->loss / 100.0f) * 0.5f));
-    return 2.0f * wheel * dir;
+    return 2.0f * wheel * c->torque_scale * dir;
 }
 
 /* body inertia (x pitch, y yaw, z roll) */
@@ -797,7 +819,7 @@ static void action_forces(Car *c, float F[3], float T[3])
     if (!g_any && c->jump_since > 0.5f) {
         float tl[3];
         tl[0] = p->air_moment[0] * c->y;
-        tl[1] = 8000.0f * c->x;
+        tl[1] = (c->backwards ? -8000.0f : 8000.0f) * c->x; /* driving backwards flips it */
         tl[2] = p->unroll_torque * (-p->unroll_gain * roll - wl[2]);
         for (int k = 0; k < 3; k++)
             tl[k] -= p->airborne_damping * wl[k];
@@ -810,6 +832,24 @@ static void action_forces(Car *c, float F[3], float T[3])
         float tw[3];
         dir_world(c, tl, tw);
         madd(T, tw, 1);
+    }
+    /* 0x381ce0: slope hold. On the ground, off the gas, under 10 ft/s: cancel the part of
+       gravity along the ground that would slide the car sideways; with the brake held, all of
+       it. Plane from the front-left tyre's contact (or the body's up axis in the air). */
+    if (g_any && c->gas == 0 && fabsf(c->fwd) < 10.0f) {
+        const float *n = c->contact[0] ? c->gnormal[0] : u;
+        float g[3] = { 0, -p->weight * p->gravity_scale, 0 }, gt[3], fp[3];
+        memcpy(gt, g, sizeof g);
+        madd(gt, n, -dot3(g, n));
+        memcpy(fp, f, sizeof fp);
+        madd(fp, n, -dot3(fp, n));
+        if (norm3(fp) == 0)
+            fp[0] = 1, fp[1] = fp[2] = 0;
+        float gf[3] = { 0, 0, 0 };
+        madd(gf, fp, dot3(fp, gt));
+        madd(F, gt, -1);
+        if (c->brake_in == 0)
+            madd(F, gf, 1); /* without the brake only the sideways part is held */
     }
     /* 0x381fc0: the jump, MaxPreload straight up for PreloadTime */
     if (c->jump_on)
@@ -845,6 +885,9 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
         driven_n += driven_wheel(c, i);
     for (int i = 0; i < 4; i++) {
         const TireParams *tp = &p->tire[i];
+        /* tyre +0x374 picks the front or rear surface tables (curves, brake torque); driving
+           backwards (0x386790) the game swaps them, so the leading pair uses the front ones */
+        const TireParams *ts = &p->tire[c->backwards ? i ^ 2 : i];
         int rear = i >= 2;
         int driven = driven_wheel(c, i);
         float R = tp->radius;
@@ -853,10 +896,14 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
            longitudinal force, over TireInertia; at most 293.3 rad/s. The brake level (+1248)
            goes to all four wheels; the stopped hold locks them. */
         float brake = c->hold ? 1.0f : c->brake;
-        float spin_sign = fmaxf(-1.0f, fminf(1.0f, 0.5f * c->omega[i]));
-        float torque = (driven ? hub_torque / driven_n : 0) - brake * tp->max_brake_torque * spin_sign;
-        c->omega[i] += (torque - c->fx_prev[i] * R) / tp->inertia * h;
-        c->omega[i] = fmaxf(-293.33f, fminf(293.33f, c->omega[i]));
+        if (brake > 0 && c->slip[i] > 0.95f) {
+            c->omega[i] = 0; /* 0x2326d0: braking past 0.95 slip locks the wheel */
+        } else {
+            float spin_sign = fmaxf(-1.0f, fminf(1.0f, 0.5f * c->omega[i]));
+            float torque = (driven ? hub_torque / driven_n : 0) - brake * ts->max_brake_torque * spin_sign;
+            c->omega[i] += (torque - c->fx_prev[i] * R) / tp->inertia * h;
+            c->omega[i] = fmaxf(-293.33f, fminf(293.33f, c->omega[i]));
+        }
         c->spin[i] += c->omega[i] * h;
         if (rear && c->burn_charge)
             c->spin[i] += 10.0f * h; /* burnout charge: the rear wheels spin on the spot */
@@ -867,11 +914,15 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
         attach(p, i, la);
         to_world(c, la, pm);
         if (!col_raycast(w, pm, d, R, &t, n)) {
-            c->comp[i] = 0;
+            /* 0x2317b0 end: the stored compression drops at most MaxDecompressionRate */
+            c->comp[i] = fmaxf(0.0f, c->comp[i] - tp->max_decomp_rate * h);
             c->fx_prev[i] = 0;
+            c->contact[i] = 0;
             continue;
         }
         grounded++;
+        c->contact[i] = 1;
+        memcpy(c->gnormal[i], n, sizeof n);
         float comp = R - t;
         float cp[3] = { pm[0] + d[0] * t, pm[1] + d[1] * t, pm[2] + d[2] * t }, rel[3], vc[3];
         sub3(cp, c->pos, rel);
@@ -880,9 +931,11 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
         if (comp > tp->max_comp) {
             /* bottomed out: push the body out and stop it moving into the ground */
             madd(c->pos, n, fminf(comp - tp->max_comp, tp->max_comp));
-            float vn = dot3(c->vel, n);
-            if (vn < 0)
+            float vn = dot3(vc, n); /* the contact point's closing speed, taken off the body */
+            if (vn < 0) {
                 madd(c->vel, n, -vn);
+                madd(vc, n, -vn);
+            }
             comp = tp->max_comp;
         }
         float vraw = dot3(vc, n);
@@ -892,7 +945,9 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
         float k = spring_k(p, i);
         float damp = 2.0f * (vs > 0 ? tp->bounce_damp : tp->rebound_damp) * sqrtf(k * m);
         float fn = fmaxf(0.0f, k * comp - damp * vs);
-        c->comp[i] = comp;
+        /* the force uses the real compression; the stored one (wheel position) may only drop
+           by MaxDecompressionRate per second */
+        c->comp[i] = fminf(tp->max_comp, comp < c->comp[i] ? c->comp[i] - fminf(c->comp[i] - comp, tp->max_decomp_rate * h) : comp);
         float fv[3] = { n[0] * fn, n[1] * fn, n[2] * fn }, tq[3];
         madd(F, fv, 1);
         cross3(rel, fv, tq);
@@ -929,9 +984,9 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, float h)
 
         /* forces (PS2 0x232a00): independent curves, no friction circle; the lateral load
            blends a quarter of the weight with the strut force by NormalLoadScale */
-        float fx = -(c->slip[i] > 0 ? 1.0f : -1.0f) * table(&tp->drive, c->slip[i], 1.0f) * fn;
+        float fx = -(c->slip[i] > 0 ? 1.0f : -1.0f) * table(&ts->drive, c->slip[i], 1.0f, 1.0f) * fn;
         float load = p->weight * 0.25f + (fn - p->weight * 0.25f) * p->normal_load_scale;
-        float fy = -(alpha > 0 ? 1.0f : -1.0f) * table(&tp->side, alpha * 0.99f, 1.5707963f) * load;
+        float fy = -(alpha > 0 ? 1.0f : -1.0f) * table(&ts->side, alpha, 1.5707963f, 0.99f) * load;
         fy *= c->lat_scale[i]; /* tyre +892: powerslide / exit / handbrake scales */
         c->fx_prev[i] = fx;
         float ft[3] = { 0, 0, 0 };

@@ -27,7 +27,8 @@ VCA (animation, resampled to a fixed rate so the runtime only lerps between fram
 Usage:
   vitaconv.py char <code> <out_dir> [anim_substring ...]
       e.g. vitaconv.py char McQ out/mcq bef_kch bef_won bef_breath beft_idle
-      (also copies <code>.phy, the game's physics, read by the driving code)
+      (also copies <code>.phy, the game's physics, read by the driving code, and
+      rscamera.ini, the follow camera presets, and fpcam.ini, the first-person camera)
   vitaconv.py model <dxg-in-paks> <out.vcm>
   vitaconv.py anim  <mot-in-paks> <out.vca>
 """
@@ -273,10 +274,24 @@ def main():
                 names.append(nm)
                 print(f"{nm}.vca  {len(d) / 1024:.0f} KB")
         open(os.path.join(out_dir, "anims.txt"), "w").write("\n".join(names) + "\n")
+        # the character's blob shadow texture (tex\<code>_shadow, drawn by the game with
+        # DXVDiffuse under the car): a one-texture VCS
+        sh = base.rsplit("anim\\", 1)[0] + f"tex\\{code}_shadow.dxt"
+        if sh in idx.files:
+            blob = texture_blob(idx.read(sh))
+            vcs = b"VCS1" + struct.pack("<4I", 1, 0, 0, 0) + struct.pack("<6f", 0, 0, 0, 0, 0, 1)
+            open(os.path.join(out_dir, "shadow.vcs"), "wb").write(vcs + blob)
+            print("shadow.vcs")
         phy = base.rsplit("anim\\", 1)[0] + f"{code}.phy"  # the game's physics for this car
         if phy in idx.files:
             open(os.path.join(out_dir, code + ".phy"), "wb").write(idx.read(phy))
             print(f"{code}.phy")
+        # the follow camera's presets ([Preset<n>] + [<Code><n>]), read by vita/src/camera.c
+        open(os.path.join(out_dir, "rscamera.ini"), "wb").write(idx.read(f"data{chr(92)}rscamera.ini"))
+        print("rscamera.ini")
+        # the first-person camera ([1Player] FOV, OffsetFromBodyPoint, LookFilter)
+        open(os.path.join(out_dir, "fpcam.ini"), "wb").write(idx.read(f"data{chr(92)}fpcam.ini"))
+        print("fpcam.ini")
     else:
         print(__doc__); sys.exit(1)
 

@@ -103,5 +103,12 @@ void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time);
 /* The in-game boost meter: bar length from BoostLevelLengths (by NOX level), fill 0..1. */
 void ui_draw_boost_meter(const Ui *ui, float length, float fill);
 void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scale, const uint8_t rgba[4], int hj, int vj);
+/* SpeedometerOverlay (PS2 0x3b01b0): speed in ft/s shown in mph (x0.681818) or the game's km/h
+   (x1.08), rounded, as three digit slots with leading blanks; reverse shows the R message
+   instead (0x3b0110). */
+void ui_draw_speedometer(Ui *ui, float speed, int kph, int reverse);
+/* ExploreMap compass (PS2 0x3ac950): heading-up ring, the player's marker in the middle and the
+   north arrow on a circle around it. heading = atan2(z, x) of the view direction in game space. */
+void ui_draw_compass(const Ui *ui, float heading);
 
 #endif

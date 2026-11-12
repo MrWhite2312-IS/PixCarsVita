@@ -14,12 +14,12 @@
  * driving McQueen (default), the game's preset 1 (Gas A, Brake X, EBrake Y, Powerslide RT):
  *            Cross       accelerate        Square / L    brake, then reverse
  *            left stick  steer             Triangle      handbrake
- *            R (hold)    powerslide        Circle        free camera
+ *            R (hold)    powerslide        Triangle      camera preset 1 -> 2 -> free camera
  *            D-pad down  reset the car     D-pad right   next music track
  * free camera:
  *            left stick  move / strafe     right stick   look
  *            D-pad up/dn rise / descend    R (hold)      fast
- *            L           next scene        Circle        back to driving
+ *            L           next scene        Triangle      back to driving
  * Start      quit
  *
  * No game data is embedded in the VPK: the user converts their own copy on PC.
@@ -42,9 +42,11 @@
 #include "vcm.h"
 #include "scene.h"
 #include "car.h"
+#include "light.h"
 #include "audio.h"
 #include "movie.h"
 #include "ui.h"
+#include "camera.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -110,7 +112,17 @@ static int audio_thread(SceSize args, void *argp)
 
 static ColWorld g_col;
 static Car g_car;
+/* the character's blob shadow (tex/<code>_shadow, exported as <code>/shadow.vcs) */
+static GLuint g_shadow_tex;
+static float g_shadow_w, g_shadow_l, g_shadow_x, g_shadow_z; /* model footprint */
 static CarParams g_params;     /* from ux0:data/pixcars/<char>/<char>.phy (McQueen's if absent) */
+static FollowCam g_cam;        /* the game's follow camera, from <char>/rscamera.ini */
+static int g_have_cam;
+static FirstPersonCam g_fpcam;  /* the game's first-person camera, from <char>/fpcam.ini */
+static int g_have_fpcam, g_first_person; /* Camera Preset cycles into it after the follow presets */
+/* the speedometer's units: the profile option (Opciones > Velocimetro) is not ported; the
+   Spanish PC game offers MpH and KpH. shortcut: km/h until the options page exists */
+#define HUD_KPH 1
 static int g_idle[8], g_n_idle; /* <char>_beft_idle* animations, played when parked */
 /* face/eye overlays of the driving actions (MCQ_EX_PL.mcf): boost, donuts (low-speed slide,
    left/right), minor and major hits */
@@ -214,13 +226,16 @@ static int load_character(const char *code)
             g_driver_node = (int)i;
         for (int w = 0; w < 4; w++) {
             size_t k = strlen(WHEEL_NAMES[w]);
-            if (n >= k + 5 && strcasecmp(g_model.nodes[i].name + n - k - 5, WHEEL_NAMES[w]) == 0
+            /* "<Char>_<wheel>_root": the wheel name, then the suffix (compare only k chars) */
+            if (n >= k + 5 && strncasecmp(g_model.nodes[i].name + n - k - 5, WHEEL_NAMES[w], k) == 0
                 && strcasecmp(g_model.nodes[i].name + n - 5, "_root") == 0)
                 g_wroot[w] = (int)i;
             else if (n >= k && strcasecmp(g_model.nodes[i].name + n - k, WHEEL_NAMES[w]) == 0)
                 g_wheel[w] = (int)i;
         }
     }
+    plog("wheel nodes: root %d %d %d %d, wheel %d %d %d %d", g_wroot[0], g_wroot[1], g_wroot[2], g_wroot[3],
+         g_wheel[0], g_wheel[1], g_wheel[2], g_wheel[3]);
 
     /* the game's physics file for this character */
     snprintf(path, sizeof path, DATA_ROOT "%s/%s.phy", code, code);
@@ -238,6 +253,47 @@ static int load_character(const char *code)
     car_params_parse(&g_params, phy);
     plog("physics: %s", phy ? path : "built-in McQueen values");
     free(phy);
+
+    /* the follow camera's presets (data\rscamera.ini, copied next to the character) */
+    snprintf(path, sizeof path, DATA_ROOT "%s/rscamera.ini", code);
+    char *cam = NULL;
+    pf = fopen(path, "rb");
+    if (pf) {
+        fseek(pf, 0, SEEK_END);
+        long n = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        cam = malloc((size_t)n + 1);
+        if (cam)
+            cam[fread(cam, 1, (size_t)n, pf)] = 0;
+        fclose(pf);
+    }
+    g_have_cam = cam && followcam_load(&g_cam, cam, code) > 0;
+    plog("camera: %s", g_have_cam ? path : "rscamera.ini missing, .phy chase camera");
+    free(cam);
+    snprintf(path, sizeof path, DATA_ROOT "%s/fpcam.ini", code);
+    cam = NULL;
+    pf = fopen(path, "rb");
+    if (pf) {
+        fseek(pf, 0, SEEK_END);
+        long n = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        cam = malloc((size_t)n + 1);
+        if (cam)
+            cam[fread(cam, 1, (size_t)n, pf)] = 0;
+        fclose(pf);
+    }
+    g_have_fpcam = fpcam_load(&g_fpcam, cam);
+    plog("first-person camera: %s", g_have_fpcam ? path : "fpcam.ini missing");
+    free(cam);
+
+    snprintf(path, sizeof path, DATA_ROOT "%s/shadow.vcs", code);
+    VcsScene sh;
+    if (vcs_load_file(&sh, path) == 0) {
+        if (sh.n_tex)
+            g_shadow_tex = upload_texture(&sh.tex[0]);
+        vcs_free(&sh);
+    }
+    plog("shadow %s: %s", path, g_shadow_tex ? "loaded" : "none");
 
     snprintf(path, sizeof path, DATA_ROOT "%s/anims.txt", code);
     FILE *f = fopen(path, "r");
@@ -296,8 +352,28 @@ static int load_character(const char *code)
 }
 
 /* ------------------------------------------------------------------ drawing */
+/* the scene's lights (<scene>.lit) and, while a scene is drawn, the three lights the car's
+   vertex shader gets, turned into the model's space */
+static SceneLights g_lights;
+static int g_have_lights, g_scene_lit;
+static ObjectLights g_car_lights;
+
 static void light_batch(const VcmBatch *b, int lighting)
 {
+    if (g_scene_lit && lighting) {
+        /* DXVAnimSkin4Diffuse: ambient + 3 x max(0, N.L) * colour, saturated */
+        for (uint32_t v = 0; v < b->n_verts; v++) {
+            const float *n = b->skinned_nrm + v * 3;
+            float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]), u[3], rgb[3];
+            for (int k = 0; k < 3; k++)
+                u[k] = len > 0 ? n[k] / len : 0;
+            lights_shade(&g_car_lights, u, rgb);
+            for (int k = 0; k < 3; k++)
+                g_col_tmp[v * 4 + k] = (uint8_t)(rgb[k] * 255.0f);
+            g_col_tmp[v * 4 + 3] = 255;
+        }
+        return;
+    }
     /* light from the camera-ish side; model is drawn with Z mirrored (D3D -> GL) */
     const float L[3] = { 0.35f, 0.80f, 0.48f };
     for (uint32_t v = 0; v < b->n_verts; v++) {
@@ -316,6 +392,57 @@ static void light_batch(const VcmBatch *b, int lighting)
         g_col_tmp[v * 4 + 2] = c;
         g_col_tmp[v * 4 + 3] = 255;
     }
+}
+
+/* The blob shadow on the ground under the car: the texture over the model's footprint,
+   laid on the surface found straight below (shortcut: the PC/PS2 characters use the
+   projected shadow casters, ProjectedShadow.cpp; this is their own blob texture instead). */
+static void draw_shadow(const Car *c)
+{
+    if (!g_shadow_tex || g_shadow_w <= 0)
+        return;
+    float o[3] = { c->pos[0], c->pos[1] + 2.0f, c->pos[2] }, d[3] = { 0, -1, 0 }, t, n[3];
+    if (!col_raycast(&g_col, o, d, 30.0f, &t, n))
+        return;
+    float g[3] = { o[0], o[1] - t + 0.08f, o[2] };
+    /* footprint axes: the car's right / forward, flattened onto the ground plane */
+    float ax[2][3];
+    for (int k = 0; k < 2; k++) {
+        const float *v = c->rot + (k ? 6 : 0);
+        float dn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2], l = 0;
+        for (int j = 0; j < 3; j++)
+            ax[k][j] = v[j] - dn * n[j], l += ax[k][j] * ax[k][j];
+        l = sqrtf(l) > 1e-4f ? sqrtf(l) : 1;
+        for (int j = 0; j < 3; j++)
+            ax[k][j] /= l;
+    }
+    /* centre of the footprint relative to the centre of mass (model origin is cofg below) */
+    float cx = g_shadow_x - g_params.cofg[0], cz = g_shadow_z - g_params.cofg[2];
+    float hw = g_shadow_w * 0.5f, hl = g_shadow_l * 0.5f, v[12], uv[8];
+    const float sx[4] = { -1, 1, -1, 1 }, sz[4] = { -1, -1, 1, 1 };
+    for (int i = 0; i < 4; i++) {
+        float x = cx + sx[i] * hw, z = cz + sz[i] * hl;
+        for (int j = 0; j < 3; j++)
+            v[i * 3 + j] = g[j] + ax[0][j] * x + ax[1][j] * z;
+        uv[i * 2] = sx[i] > 0 ? 1.0f : 0.0f;
+        uv[i * 2 + 1] = sz[i] > 0 ? 0.0f : 1.0f;
+    }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_shadow_tex);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glColor4ub(255, 255, 255, 255);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 0, v);
+    glTexCoordPointer(2, GL_FLOAT, 0, uv);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 }
 
 static void draw_model(int lighting)
@@ -396,6 +523,9 @@ static int load_scene_named(const char *name)
 {
     char path[256];
     free_scene();
+    snprintf(path, sizeof path, DATA_ROOT "scene/%s.lit", name);
+    g_have_lights = lights_load(&g_lights, path) == 0;
+    plog("lights %s: %s", path, g_have_lights ? "loaded" : "none (made-up light and fog)");
     snprintf(path, sizeof path, DATA_ROOT "scene/%s.vcs", name);
     plog("loading scene %s", path);
     int r = vcs_load_file(&g_scene, path);
@@ -673,6 +803,7 @@ typedef struct {
     int burn, slide;
     float burn_lv, slide_lv, sus_cool, imp_cool;
     int brake_armed, nox_was, tilt_exit_was;
+    int boost;                 /* voice of the boost sound while it plays, or -1 */
 } DriveSfx;
 
 static float sfx_loop(int voice, int id, int on, float slip, float *level, float dt)
@@ -717,9 +848,22 @@ static void drive_sounds(DriveSfx *d, const Car *c, float dt)
     }
     if (c->brake_in <= 0)
         d->brake_armed = 1;
-    /* NOX: carengine.aud [<Char>BoostSound] when the boost kicks in */
-    if (c->nox_on && !d->nox_was)
-        play_sfx("boost", 1);
+    /* NOX: carengine.aud [<Char>BoostSound]. The game starts it when the boost kicks in (if it
+       is not already playing) and stops it with a fade when the boost ends (0x3623f0 modes 1/2) */
+    Voice *bv = d->boost >= 0 ? &g_audio.voice[d->boost] : NULL;
+    if (bv && (!bv->active || bv->sfx != audio_sfx(&g_audio, "boost", 0)))
+        d->boost = -1, bv = NULL; /* finished, or the voice went to another sound */
+    if (c->nox_on && !d->nox_was && !bv)
+        d->boost = audio_play(&g_audio, audio_sfx(&g_audio, "boost", 0), 1, 1, 0);
+    else if (c->nox_on && bv)
+        bv->vol = 1; /* boost back on during the fade */
+    if (!c->nox_on && bv) {
+        bv->vol = fmaxf(0.0f, bv->vol - dt / 0.15f); /* short fade out */
+        if (bv->vol <= 0) {
+            bv->active = 0;
+            d->boost = -1;
+        }
+    }
     d->nox_was = c->nox_on;
     /* Tilt: [<char>WheelStand] FileNameUp going up, FileNameDown on the way down */
     if (c->tilt_start)
@@ -1114,6 +1258,10 @@ int main(void)
                 mx[c] = p > mx[c] ? p : mx[c];
             }
     float target[3] = { (mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2 };
+    g_shadow_w = mx[0] - mn[0];
+    g_shadow_l = mx[2] - mn[2];
+    g_shadow_x = (mn[0] + mx[0]) * 0.5f;
+    g_shadow_z = (mn[2] + mx[2]) * 0.5f;
     float radius = sqrtf((mx[0] - mn[0]) * (mx[0] - mn[0]) + (mx[1] - mn[1]) * (mx[1] - mn[1]) +
                          (mx[2] - mn[2]) * (mx[2] - mn[2])) / 2;
     if (!have_char)
@@ -1131,7 +1279,7 @@ int main(void)
     float chase[3] = { 0, 0, 0 };
     int chase_init = 0, idle_anim = -1;
     Lean lean = { 0.5f, 0.5f, 0.5f, 0.5f, 0.0f };
-    DriveSfx dsfx = { -1, -1, 0, 0, 0, 0, 1, 0, 0 };
+    DriveSfx dsfx = { -1, -1, 0, 0, 0, 0, 1, 0, 0, -1 };
     Overlay ov = { -1, 0, 0 };
     float parked_t = 0, idle_t = 0;
     uint32_t prev_buttons = 0;
@@ -1178,9 +1326,24 @@ int main(void)
             plog("mode -> %s", mode ? "scene" : "character");
         }
 
-        /* Triangle (the game's Camera Preset): chase camera <-> free camera */
+        /* Triangle (the game's Camera Preset, 0x21ab20): the follow camera's presets with
+           CycleThruThisPreset (1, 2); after the last one the first-person camera (fpcam.ini);
+           from there the game goes back to the first preset. The port puts its free camera
+           (not in the game) between the first-person camera and the first preset. */
         if (mode == 1 && have_char && (pressed & SCE_CTRL_TRIANGLE)) {
-            driving = !driving;
+            if (driving && g_first_person) {
+                g_first_person = 0;
+                driving = 0;
+            } else if (driving && g_have_cam && followcam_next(&g_cam)) {
+                followcam_reset(&g_cam);
+            } else if (driving && g_have_fpcam) {
+                g_first_person = 1;
+                fpcam_reset(&g_fpcam);
+            } else {
+                driving = !driving;
+                if (driving && g_have_cam)
+                    followcam_reset(&g_cam);
+            }
             chase_init = 0;
         }
         if (mode == 1 && driving && g_scene_loaded) {
@@ -1238,9 +1401,27 @@ int main(void)
                 }
             }
 
-            /* chase camera from the .phy: CameraOffset above the car, CameraFollowingDistance behind */
             float M[16];
             car_matrix(&g_car, M);
+            if (g_have_cam) {
+                /* the game's follow camera (rscamera.ini preset) around the car's origin */
+                float eye[3], look[3], hfov;
+                if (!chase_init)
+                    followcam_reset(&g_cam);
+                chase_init = 1;
+                if (g_first_person)
+                    fpcam_update(&g_fpcam, &M[12], g_car.rot, dt, eye, look, &hfov);
+                else
+                    followcam_update(&g_cam, &M[12], g_car.rot, g_car.vel, dt, eye, look, &hfov);
+                float d[3] = { look[0] - eye[0], look[1] - eye[1], look[2] - eye[2] };
+                float dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                memcpy(cam, eye, sizeof cam);
+                cyaw = atan2f(d[0], d[2]);
+                cpitch = asinf(d[1] / (dl > 1e-3f ? dl : 1.0f));
+                /* FOV: horizontal degrees on 4:3; keep its vertical FOV on 16:9 (as the front end) */
+                g_tan_half_v = tanf(hfov * 0.5f * 3.14159265f / 180.0f) * 0.75f;
+            }
+            /* without rscamera.ini: the .phy's CameraOffset above the car, CameraFollowingDistance behind */
             const float *co = g_params.cam_offset;
             float fx = g_car.rot[6], fz = g_car.rot[8], fl = sqrtf(fx * fx + fz * fz);
             if (fl < 1e-3f) { fx = 0; fz = 1; fl = 1; }
@@ -1250,11 +1431,13 @@ int main(void)
             for (int c = 0; c < 3; c++)
                 chase[c] += (want[c] - chase[c]) * k;
             chase_init = 1;
-            float look[3] = { tgt[0] - chase[0], tgt[1] - chase[1], tgt[2] - chase[2] };
-            float ll = sqrtf(look[0] * look[0] + look[1] * look[1] + look[2] * look[2]);
-            memcpy(cam, chase, sizeof cam);
-            cyaw = atan2f(look[0], look[2]);
-            cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
+            if (!g_have_cam) {
+                float look[3] = { tgt[0] - chase[0], tgt[1] - chase[1], tgt[2] - chase[2] };
+                float ll = sqrtf(look[0] * look[0] + look[1] * look[1] + look[2] * look[2]);
+                memcpy(cam, chase, sizeof cam);
+                cyaw = atan2f(look[0], look[2]);
+                cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
+            }
             const VcaAnim *pa[7];
             float pw[7], pt[7];
             int pn;
@@ -1275,6 +1458,7 @@ int main(void)
         if (mode != 1 || !driving) {
             g_audio.engine_vol = 0;
             stop_drive_sounds(&dsfx);
+            g_tan_half_v = DEFAULT_TAN_HALF_V;
         }
         if (mode == 1) {
             int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
@@ -1315,13 +1499,27 @@ int main(void)
             }
 
             glViewport(0, 0, SCREEN_W, SCREEN_H);
-            const float sky[4] = { 0.59f, 0.67f, 0.78f, 1.0f };
+            float sky[4] = { 0.59f, 0.67f, 0.78f, 1.0f };
+            float fog0 = SCENE_FAR * 0.45f, fog1 = SCENE_FAR;
+            if (g_have_lights && g_lights.has_fog) {
+                /* the scene's [Fog]: linear from MinimumFogDistance to MaximumFogDistance (the
+                   shader's oFog = distance * scale + bias) */
+                memcpy(sky, g_lights.fog_col, 12);
+                fog0 = g_lights.fog_min;
+                fog1 = g_lights.fog_max;
+                /* shortcut: the Vita draws to SCENE_FAR, not the game's 20000 ft far plane;
+                   end the fog there so nothing pops in */
+                if (fog1 > SCENE_FAR)
+                    fog1 = SCENE_FAR;
+                if (fog0 > fog1 * 0.9f)
+                    fog0 = fog1 * 0.9f;
+            }
             glClearColor(sky[0], sky[1], sky[2], 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glEnable(GL_FOG);
             glFogi(GL_FOG_MODE, GL_LINEAR);
-            glFogf(GL_FOG_START, SCENE_FAR * 0.45f);
-            glFogf(GL_FOG_END, SCENE_FAR);
+            glFogf(GL_FOG_START, fog0);
+            glFogf(GL_FOG_END, fog1);
             glFogfv(GL_FOG_COLOR, sky);
             scene_camera(cam, cyaw, cpitch, cfwd);
             static int logged_frames;
@@ -1329,12 +1527,26 @@ int main(void)
                 plog("scene frame %d: drawing", logged_frames);
             if (g_scene_loaded)
                 draw_scene(cam, cfwd);
-            if (g_scene_loaded && have_char) {
+            /* the first-person camera hides the car (and its shadow), as the game does */
+            if (g_scene_loaded && have_char && !(driving && g_first_person)) {
+                draw_shadow(&g_car);
                 float M[16];
                 car_matrix(&g_car, M);
                 glPushMatrix();
                 glMultMatrixf(M);
+                if (g_have_lights) {
+                    /* the car's three lights at its position, into model space (rows of M) */
+                    ObjectLights w;
+                    lights_for(&g_lights, g_car.pos, &w);
+                    g_car_lights = w;
+                    for (int i = 0; i < w.n; i++)
+                        for (int k = 0; k < 3; k++)
+                            g_car_lights.dir[i][k] = w.dir[i][0] * M[k * 4] + w.dir[i][1] * M[k * 4 + 1] +
+                                                     w.dir[i][2] * M[k * 4 + 2];
+                    g_scene_lit = 1;
+                }
                 draw_model(lighting);
+                g_scene_lit = 0;
                 glPopMatrix();
             }
             glDisable(GL_FOG);
@@ -1342,13 +1554,16 @@ int main(void)
                 /* HUD: the BoostMeterOverlay, bar length by NOX level, fill = NOX left */
                 int lv = (int)g_params.nox_level;
                 float cap = g_params.nox_base * g_params.nox_level;
-                if (lv >= 1 && lv <= 3 && cap > 0) {
-                    ui_begin();
+                ui_begin();
+                if (lv >= 1 && lv <= 3 && cap > 0)
                     ui_draw_boost_meter(&g_ui, g_ui.boost_len[lv - 1], g_car.nox / cap);
-                    glColor4ub(255, 255, 255, 255);
-                    glDisable(GL_BLEND);
-                    glEnable(GL_DEPTH_TEST);
-                }
+                /* SpeedometerOverlay: R while in reverse gear, else the speed */
+                ui_draw_speedometer(&g_ui, fabsf(car_speed(&g_car)), HUD_KPH, g_car.gear < 0);
+                /* ExploreMap: the compass turns with the view (heading = atan2(z, x)) */
+                ui_draw_compass(&g_ui, atan2f(cfwd[2], cfwd[0]));
+                glColor4ub(255, 255, 255, 255);
+                glDisable(GL_BLEND);
+                glEnable(GL_DEPTH_TEST);
             }
             vglSwapBuffers(GL_FALSE);
             if (logged_frames < 2)

@@ -12,8 +12,13 @@ VCS1 format (little-endian, 4-byte aligned, read by vita/src/scene.c):
                        f32 pos[n*3]; f32 uv[n*2]; u8 rgba[n*4]; u16 strip[n_idx] (+pad)
   instance[n_inst]: u32 mesh; f32 world[16] (row-major, v' = v*M); f32 center[3], radius
 
-Lighting is baked into the vertex colours: prelit meshes keep their authored colours,
-the rest get a fixed sun (Lambert + ambient) computed here on the PC.
+Lighting is baked into the vertex colours: prelit meshes keep their authored colours, the
+rest are lit like the game's DXVDiffuse vertex shader does it with the scene's own lights:
+zone-1 ambient + max(0, N.L) * colour of each directional light, in world space (so such a
+mesh is baked once per instance rotation). The lights and fog also go to <out>.lit for the
+Vita (car lighting, fog):
+  ambient r g b | dir lx ly lz r g b | spot px py pz dx dy dz inner outer a0 a1 a2 range r g b
+  fog r g b min max
 
 Usage:
   vitascene.py <toy-or-scn in paks> <out.vcs> [x z radius] [start=x,y,z] [dir=x,y,z]
@@ -29,7 +34,6 @@ from vitaconv import texture_blob, pad4
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
-SUN = scene.norm((0.45, 0.80, 0.40))
 
 
 def toy_start_position(idx, key, name=None):
@@ -61,6 +65,8 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
         inst = [i for i in inst if math.dist((i[1][12], i[1][14]), (x, z)) < r]
     textures, tex_ids, materials, mat_ids = [], {}, [], {}
     meshes, mesh_ids, instances = [], {}, []
+    mesh_cache = {}
+    lights = scene.lights(idx, key)
 
     def tex_index(tk, raw=None):
         if tk not in tex_ids:
@@ -106,10 +112,24 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
         materials.append(struct.pack("<I", n) + layer + empty)
         return mat_ids[k]
 
-    def mesh_index(mk, m=None, near=None):
-        if mk in mesh_ids:
-            return mesh_ids[mk]
-        m = m or dxg.parse(idx.read(mk))
+    def lit(n, rot):
+        """game diffuse lighting of a model-space normal under the instance rotation"""
+        w = [n[0] * rot[0] + n[1] * rot[3] + n[2] * rot[6], n[0] * rot[1] + n[1] * rot[4] + n[2] * rot[7],
+             n[0] * rot[2] + n[1] * rot[5] + n[2] * rot[8]]
+        ln = math.sqrt(sum(c * c for c in w)) or 1
+        c = list(lights["ambient"])
+        for L, col in lights["dir"]:
+            d = max(0.0, (w[0] * L[0] + w[1] * L[1] + w[2] * L[2]) / ln)
+            for k in range(3):
+                c[k] += d * col[k]
+        return bytes(int(255 * min(1.0, max(0.0, v))) for v in c) + bytes((255,))
+
+    def mesh_index(mk, m=None, near=None, rot=(1, 0, 0, 0, 1, 0, 0, 0, 1)):
+        m = m or (mesh_cache.get(mk) or mesh_cache.setdefault(mk, dxg.parse(idx.read(mk))))
+        prelit = all(b["streams"].get("color") for b in m["lods"][0]["batches"])
+        key = mk if prelit else (mk, tuple(round(r, 3) for r in rot))
+        if key in mesh_ids:
+            return mesh_ids[key]
         near = near or mk
         world = dxg.world_matrices(m)
         nm = world[0] if m["nodes"] else (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
@@ -127,11 +147,7 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
                     bb, gg, rr, aa = col[i * 4:i * 4 + 4]
                     rgba += bytes((rr, gg, bb, aa))
                 else:
-                    n = nrm[i] if nrm else (0.0, 1.0, 0.0)
-                    ln = math.sqrt(sum(c * c for c in n)) or 1
-                    d = (n[0] * SUN[0] + n[1] * SUN[1] + n[2] * SUN[2]) / ln
-                    s = int(255 * min(1.0, 0.5 + 0.6 * max(0.0, d)))
-                    rgba += bytes((s, s, s, 255))
+                    rgba += lit(nrm[i] if nrm else (0.0, 1.0, 0.0), rot)
             mi = material_index(m["materials"][b["material"]], near)
             blob = struct.pack("<3I", mi, vc, len(b["strip"]))
             blob += struct.pack(f"<{vc * 3}f", *[c for p in pos for c in p])
@@ -144,12 +160,12 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
             r = max(math.dist(c, p) for p in pts)
         else:
             c, r = (0.0, 0.0, 0.0), 0.0
-        mesh_ids[mk] = len(meshes)
+        mesh_ids[key] = len(meshes)
         meshes.append((c, r, struct.pack("<4fI", *c, r, len(blobs)) + b"".join(blobs)))
-        return mesh_ids[mk]
+        return mesh_ids[key]
 
     for mk, m, name in inst:
-        mi = mesh_index(mk)
+        mi = mesh_index(mk, rot=(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]))
         c, r, _ = meshes[mi]
         wc = scene.transform(c, m)
         instances.append(struct.pack("<I16f4f", mi, *m, *wc, r))
@@ -176,7 +192,10 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
         start = (xs[len(xs) // 2], ys[len(ys) // 2] + 60, zs[len(zs) // 2])
     # the game spawns at a [StartPositionToyN] of the scene's .toy (activities name one with
     # NextStart, e.g. Player1Start): prefer that over SceneInfo's default
-    toy_start = toy_start_position(idx, key, start_name)
+    try:
+        toy_start = toy_start_position(idx, key, start_name)
+    except ValueError:  # a malformed .toy value (cd.toy has "52604'7"): start= decides
+        toy_start = None
     if toy_start:
         start, toy_dir = toy_start
         if not dir_override:
@@ -188,7 +207,17 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
     out += struct.pack("<6f", *start, *sdir)
     out += b"".join(textures) + b"".join(materials) + b"".join(m[2] for m in meshes)
     out += b"".join(instances)
-    return out, len(textures), len(materials), len(meshes), len(instances), missing
+    return out, len(textures), len(materials), len(meshes), len(instances), missing, lights
+
+
+def lit_text(L):
+    rows = ["ambient %g %g %g" % L["ambient"]]
+    rows += ["dir %g %g %g %g %g %g" % (*d, *c) for d, c in L["dir"]]
+    rows += ["spot %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g" % (*p, *dv, i, o, *att, rg, *c)
+             for p, dv, i, o, att, rg, c in L["spot"]]
+    if L["fog"]:
+        rows.append("fog %g %g %g %g %g" % (*L["fog"][0], L["fog"][1], L["fog"][2]))
+    return "\n".join(rows) + "\n"
 
 
 def main():
@@ -212,9 +241,10 @@ def main():
               if m and not isinstance(m, Exception)]
         streamed = (assets, ms)
         print(f"streamed terrain: {len(ms)} objects")
-    data, nt, nm, nme, ni, missing = export(idx, key, keep, st, di, streamed, opts.get("startname"))
+    data, nt, nm, nme, ni, missing, lights = export(idx, key, keep, st, di, streamed, opts.get("startname"))
     os.makedirs(os.path.dirname(os.path.abspath(a[1])), exist_ok=True)
     open(a[1], "wb").write(data)
+    open(a[1][:-4] + ".lit", "w").write(lit_text(lights))
     print(f"{a[1]}: {len(data) / 1e6:.1f} MB  textures={nt} materials={nm} meshes={nme} "
           f"instances={ni} missing={len(set(missing))}")
 

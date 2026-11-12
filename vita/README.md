@@ -127,6 +127,17 @@ python tools/vitaconv.py char McQ extracted/vita/mcq bef_kch bef_won bef_breath 
 python tools/vitaaudio.py extracted/vita/audio
 ```
 
+Cámara y HUD del juego: la cámara de persecución es la `CarsCameraFollow` del ELF de PS2
+(actualización 0x21f4f0) con los presets de `data\rscamera.ini` (`[Preset1]` + `[McQ1]`:
+26° por encima, 19 ft detrás, FOV 75°; filtros por eje `LookFilters`/`PosFilters`, ángulo
+reducido a baja velocidad, giro con `CameraSwing`). `vitaconv.py char` copia `rscamera.ini`
+en la carpeta del personaje. Triángulo (Camera Preset) pasa Preset 1 → Preset 2 → cámara
+libre. El HUD añade el velocímetro digital `SpeedometerOverlay` (0x3b01b0, en km/h; «R» en
+marcha atrás) y la brújula `ExploreMap` (0x3ac950, gira con la vista, flecha naranja al
+norte). Vuelve a ejecutar `vitaui.py` (nueva fuente `48pt_bullet_stroke`). Sin hacer aún:
+colisión de la cámara, efecto de FOV del turbo, temblor, y los puntos del radar (esperan a las
+actividades del modo explorar).
+
 Si la pantalla se queda roja, no encuentra `ux0:data/pixcars/mcq/model.vcm`.
 
 ## Prueba en el PC (sin VitaSDK)
@@ -146,4 +157,32 @@ Física del coche (lectura del `.phy`, plano, aceleración y marchas, giro, fren
 ```bash
 gcc -O2 -std=c99 -Ivita/src vita/src/car.c vita/src/scene.c vita/src/vcm.c vita/tests/car_test.c -lm -o car_test
 ./car_test extracted/vita/mcq/mcq.phy extracted/vita/scene/rs.vcs
+```
+
+Iluminación (lectura del `.lit`, las tres luces por objeto, sombreado):
+
+```bash
+gcc -O2 -std=c99 -Ivita/src vita/src/light.c vita/tests/light_test.c -lm -o light_test
+./light_test extracted/vita/scene/rs.lit
+```
+
+## Iluminación de la escena
+
+`vitascene.py` escribe junto a cada `<escena>.vcs` un `<escena>.lit` con las luces del propio
+`.scn` (zona 1): ambiente, sol direccional, focos (con color negativo, que oscurecen) y niebla.
+La fórmula sale del shader de vértices del juego `DXVAnimSkin4Diffuse.xvu` (microcódigo NV2A
+desensamblado): ambiente + 3 luces × max(0, N·L) × color, saturado, y niebla lineal.
+
+- **Escenario**: las mallas sin luz horneada se iluminan al exportar con esas luces (por
+  rotación de cada instancia); las prelit conservan sus colores.
+- **McQueen**: cada fotograma recibe el sol y los focos que más le afectan en su posición.
+- **Niebla y cielo**: color y distancias de `[Fog]` (el final se recorta a la distancia de
+  dibujo de la Vita).
+- **Sombra**: la textura `McQ_shadow` del juego bajo el coche (el original usa sombras
+  proyectadas en tiempo real).
+
+Re-exporta las escenas y el personaje y copia `scene/` y `mcq/` (con `shadow.vcs`):
+
+```bash
+python tools/vitascene.py data/scenes/rs/rs.scn extracted/vita/scene/rs.vcs start=9760,440,19560 dir=0.58,-0.08,0.81
 ```
