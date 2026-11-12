@@ -356,6 +356,8 @@ static void draw_scene(const float eye[3], const float fwd[3])
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
+    /* pass 0: opaque, pass 1: blended (lamp glows etc.) over the finished depth buffer */
+    for (int pass = 0; pass < 2; pass++)
     for (uint32_t i = 0; i < g_scene.n_inst; i++) {
         const VcsInstance *in = &g_scene.inst[i];
         float d[3] = { in->center[0] - eye[0], in->center[1] - eye[1], in->center[2] - eye[2] };
@@ -371,6 +373,14 @@ static void draw_scene(const float eye[3], const float fwd[3])
             const VcsBatch *bt = &me->batch[b];
             const VcmMaterial *mat = &g_scene.mat[bt->material];
             const VcmLayer *l = &mat->layer[0];
+            int blended = mat->n_layers && (l->flags & VCM_LAYER_BLEND);
+            if (blended != pass)
+                continue;
+            if (blended) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, (l->flags & VCM_LAYER_ADDITIVE) ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask((l->flags & VCM_LAYER_NOZWRITE) ? GL_FALSE : GL_TRUE);
+            }
             if (mat->n_layers && l->tex >= 0) {
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, g_scene.tex[l->tex].gpu_handle);
@@ -398,6 +408,8 @@ static void draw_scene(const float eye[3], const float fwd[3])
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
     glDisable(GL_ALPHA_TEST);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);

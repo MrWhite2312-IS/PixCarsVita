@@ -62,7 +62,10 @@ def export(idx, key, keep=None, start_override=None, dir_override=None):
                     continue
                 flags = (1 if p.alpha_test else 0) \
                     | (2 if st["address_u"] in ("CLAMP", "BORDER") else 0) \
-                    | (4 if st["address_v"] in ("CLAMP", "BORDER") else 0)
+                    | (4 if st["address_v"] in ("CLAMP", "BORDER") else 0) \
+                    | (8 if p.alpha_blend else 0) \
+                    | (16 if p.alpha_blend and p.dst_blend == "ONE" else 0) \
+                    | (32 if not p.z_write else 0)
                 layer = struct.pack("<iIIi6f2f", tex_index(tk), flags, p.alpha_ref, -1,
                                     *([0.0] * 6), 0.5, 0.5)
                 n = 1
