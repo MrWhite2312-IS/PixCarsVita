@@ -21,6 +21,7 @@ add_executable(${PROJECT_NAME}
   src/main.c
   src/vcm.c
   src/scene.c
+  src/car.c
 )
 
 target_link_libraries(${PROJECT_NAME}

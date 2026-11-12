@@ -10,10 +10,15 @@
  *            L / R       previous / next animation
  *            Cross       pause / resume    Circle        bind pose
  *            Square      toggle lighting
- * Scene mode (Select switches; ux0:data/pixcars/scene/<name>.vcs listed in scenes.txt):
+ * Scene mode (Select switches; ux0:data/pixcars/scene/<name>.vcs listed in scenes.txt),
+ * driving McQueen (default):
+ *            R / Cross   accelerate        L / Square    brake, then reverse
+ *            left stick  steer             Circle        handbrake
+ *            D-pad down  reset the car     Triangle      free camera
+ * free camera:
  *            left stick  move / strafe     right stick   look
  *            D-pad up/dn rise / descend    R (hold)      fast
- *            L           next scene
+ *            L           next scene        Triangle      back to driving
  * Start      quit
  *
  * No game data is embedded in the VPK: the user converts their own copy on PC.
@@ -32,6 +37,7 @@
 
 #include "vcm.h"
 #include "scene.h"
+#include "car.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -66,6 +72,12 @@ static VcsScene g_scene;
 static int g_scene_loaded;
 static char g_scene_names[MAX_SCENES][64];
 static int g_n_scenes, g_scene_cur;
+static ColWorld g_col;
+static Car g_car;
+/* wheel nodes, in car.c order FL, FR, RL, RR: <Char>_wheel*_root (steer, suspension) and
+   their child <Char>_wheel* (roll) */
+static const char *WHEEL_NAMES[4] = { "wheelfrontleft", "wheelfrontright", "wheelrearleft", "wheelrearright" };
+static int g_wroot[4] = { -1, -1, -1, -1 }, g_wheel[4] = { -1, -1, -1, -1 };
 
 static void log_msg(const char *s)
 {
@@ -138,6 +150,14 @@ static int load_character(const char *code)
         size_t n = strlen(g_model.nodes[i].name);
         if (n >= 7 && strcasecmp(g_model.nodes[i].name + n - 7, "_Driver") == 0)
             g_driver_node = (int)i;
+        for (int w = 0; w < 4; w++) {
+            size_t k = strlen(WHEEL_NAMES[w]);
+            if (n >= k + 5 && strcasecmp(g_model.nodes[i].name + n - k - 5, WHEEL_NAMES[w]) == 0
+                && strcasecmp(g_model.nodes[i].name + n - 5, "_root") == 0)
+                g_wroot[w] = (int)i;
+            else if (n >= k && strcasecmp(g_model.nodes[i].name + n - k, WHEEL_NAMES[w]) == 0)
+                g_wheel[w] = (int)i;
+        }
     }
 
     snprintf(path, sizeof path, DATA_ROOT "%s/anims.txt", code);
@@ -259,6 +279,7 @@ static void free_scene(void)
                 glDeleteBuffers(1, &bt->ibo);
         }
     vcs_free(&g_scene);
+    col_free(&g_col);
     g_scene_loaded = 0;
 }
 
@@ -298,6 +319,9 @@ static int load_scene(int index)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     plog("geometry uploaded: %u KB", bytes / 1024);
+    r = col_build(&g_col, &g_scene);
+    plog("collision: %d, %u triangles, grid %dx%d", r, g_col.n_tri, g_col.nx, g_col.nz);
+    car_spawn(&g_car, &g_col, g_scene.start, atan2f(g_scene.start_dir[0], g_scene.start_dir[2]));
     g_scene_loaded = 1;
     sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", g_scene_names[index],
                   g_scene.n_mesh, g_scene.n_inst);
@@ -433,6 +457,37 @@ static void set_camera(float yaw, float pitch, float dist, const float target[3]
     glTranslatef(-target[0], -target[1], -target[2]);
 }
 
+/* Bind pose with the wheels steered, rolled and following the suspension. */
+static void pose_car(const Car *c)
+{
+    float saved[8][16];
+    for (int w = 0; w < 4; w++) {
+        if (g_wroot[w] >= 0) {
+            float *L = g_model.nodes[g_wroot[w]].local;
+            memcpy(saved[w], L, 64);
+            float s = w < 2 ? c->steer : 0, cs = cosf(s), sn = sinf(s);
+            const float Ry[16] = { cs, 0, -sn, 0, 0, 1, 0, 0, sn, 0, cs, 0, 0, 0, 0, 1 };
+            vcm_mat_mul(Ry, saved[w], L);
+            L[13] += car_wheel_offset(c, w);
+        }
+        if (g_wheel[w] >= 0) {
+            float *L = g_model.nodes[g_wheel[w]].local;
+            memcpy(saved[4 + w], L, 64);
+            float cs = cosf(c->spin[w]), sn = sinf(c->spin[w]);
+            const float Rx[16] = { 1, 0, 0, 0, 0, cs, sn, 0, 0, -sn, cs, 0, 0, 0, 0, 1 };
+            vcm_mat_mul(Rx, saved[4 + w], L);
+        }
+    }
+    vcm_pose(&g_model, NULL, 0);
+    vcm_skin(&g_model);
+    for (int w = 0; w < 4; w++) {
+        if (g_wroot[w] >= 0)
+            memcpy(g_model.nodes[g_wroot[w]].local, saved[w], 64);
+        if (g_wheel[w] >= 0)
+            memcpy(g_model.nodes[g_wheel[w]].local, saved[4 + w], 64);
+    }
+}
+
 /* ------------------------------------------------------------------ main */
 int main(void)
 {
@@ -487,7 +542,9 @@ int main(void)
         cpitch = asinf(g_scene.start_dir[1]);
     }
     float t = 0.0f;
-    int paused = 0, lighting = 1;
+    int paused = 0, lighting = 1, driving = have_char;
+    float chase[3] = { 0, 0, 0 };
+    int chase_init = 0;
     uint32_t prev_buttons = 0;
     SceUInt64 last = sceKernelGetProcessTimeWide();
 
@@ -515,12 +572,48 @@ int main(void)
             }
             if (g_scene_loaded)
                 mode = !mode;
+            chase_init = 0;
             plog("mode -> %s", mode ? "scene" : "character");
+        }
+
+        if (mode == 1 && have_char && (pressed & SCE_CTRL_TRIANGLE)) {
+            driving = !driving;
+            chase_init = 0;
+        }
+        if (mode == 1 && driving && g_scene_loaded) {
+            int lx = (int)pad.lx - 128;
+            CarInput in = { 0 };
+            in.throttle = (pad.buttons & (SCE_CTRL_RTRIGGER | SCE_CTRL_CROSS)) ? 1.0f : 0.0f;
+            in.brake = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) ? 1.0f : 0.0f;
+            in.steer = abs(lx) > 16 ? lx / 128.0f : 0.0f;
+            in.handbrake = (pad.buttons & SCE_CTRL_CIRCLE) != 0;
+            if (pressed & SCE_CTRL_DOWN) {
+                float yaw_now = atan2f(g_car.rot[6], g_car.rot[8]);
+                car_spawn(&g_car, &g_col, g_car.pos, yaw_now);
+            }
+            car_step(&g_car, &g_col, &in, dt);
+
+            /* chase camera: behind and above, smoothed */
+            float fx = g_car.rot[6], fz = g_car.rot[8], fl = sqrtf(fx * fx + fz * fz);
+            if (fl < 1e-3f) { fx = 0; fz = 1; fl = 1; }
+            float want[3] = { g_car.pos[0] - fx / fl * 22.0f, g_car.pos[1] + 8.0f, g_car.pos[2] - fz / fl * 22.0f };
+            float k = chase_init ? fminf(1.0f, 6.0f * dt) : 1.0f;
+            for (int c = 0; c < 3; c++)
+                chase[c] += (want[c] - chase[c]) * k;
+            chase_init = 1;
+            float look[3] = { g_car.pos[0] - chase[0], g_car.pos[1] + 2.5f - chase[1], g_car.pos[2] - chase[2] };
+            float ll = sqrtf(look[0] * look[0] + look[1] * look[1] + look[2] * look[2]);
+            memcpy(cam, chase, sizeof cam);
+            cyaw = atan2f(look[0], look[2]);
+            cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
+            pose_car(&g_car);
         }
 
         if (mode == 1) {
             int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
             int rx = (int)pad.rx - 128, ry = (int)pad.ry - 128;
+            if (driving)
+                lx = ly = rx = ry = 0, pad.buttons &= ~(SCE_CTRL_UP | SCE_CTRL_DOWN), pressed = 0;
             float speed = (pad.buttons & SCE_CTRL_RTRIGGER) ? 2400.0f : 500.0f;
             if (abs(rx) > 20)
                 cyaw += rx * dt * 0.018f;
@@ -567,6 +660,14 @@ int main(void)
                 plog("scene frame %d: drawing", logged_frames);
             if (g_scene_loaded)
                 draw_scene(cam, cfwd);
+            if (g_scene_loaded && have_char) {
+                float M[16];
+                car_matrix(&g_car, M);
+                glPushMatrix();
+                glMultMatrixf(M);
+                draw_model(lighting);
+                glPopMatrix();
+            }
             glDisable(GL_FOG);
             vglSwapBuffers(GL_FALSE);
             if (logged_frames < 2)

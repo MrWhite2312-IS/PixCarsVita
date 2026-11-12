@@ -43,6 +43,20 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 | □ | Activar/desactivar iluminación |
 | START | Salir |
 
+### Escenario (SELECT) — conducir a McQueen
+
+| Botón | Acción |
+|---|---|
+| R / ✕ | Acelerar |
+| L / □ | Frenar; parado, marcha atrás |
+| Stick izquierdo | Girar |
+| ○ | Freno de mano |
+| Cruceta ↓ | Recolocar el coche (derecho, en el sitio) |
+| △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
+
+La física (`src/car.c`) es un sólido rígido con 4 ruedas: suspensión por rayos contra la
+geometría sólida del escenario, agarre con círculo de fricción y choques contra paredes.
+
 Si la pantalla se queda roja, no encuentra `ux0:data/pixcars/mcq/model.vcm`.
 
 ## Prueba en el PC (sin VitaSDK)
@@ -56,3 +70,10 @@ gcc -O2 -std=c99 -Ivita/src vita/src/vcm.c vita/tests/host_test.c -lm -o host_te
 
 Imprime los vértices deformados; coinciden con `tools/pose.py` (error < 0,012 unidades,
 por los pesos de hueso cuantizados a 8 bits).
+
+Física del coche (plano, giro, frenada, pared y, opcional, un escenario real):
+
+```bash
+gcc -O2 -std=c99 -Ivita/src vita/src/car.c vita/src/scene.c vita/src/vcm.c vita/tests/car_test.c -lm -o car_test
+./car_test extracted/vita/scene/rs.vcs
+```
