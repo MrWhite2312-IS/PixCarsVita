@@ -74,6 +74,8 @@ static char g_scene_names[MAX_SCENES][64];
 static int g_n_scenes, g_scene_cur;
 static ColWorld g_col;
 static Car g_car;
+static CarParams g_params;     /* from ux0:data/pixcars/<char>/<char>.phy (McQueen's if absent) */
+static int g_idle[8], g_n_idle; /* <char>_beft_idle* animations, played when parked */
 /* wheel nodes, in car.c order FL, FR, RL, RR: <Char>_wheel*_root (steer, suspension) and
    their child <Char>_wheel* (roll) */
 static const char *WHEEL_NAMES[4] = { "wheelfrontleft", "wheelfrontright", "wheelrearleft", "wheelrearright" };
@@ -160,6 +162,23 @@ static int load_character(const char *code)
         }
     }
 
+    /* the game's physics file for this character */
+    snprintf(path, sizeof path, DATA_ROOT "%s/%s.phy", code, code);
+    char *phy = NULL;
+    FILE *pf = fopen(path, "rb");
+    if (pf) {
+        fseek(pf, 0, SEEK_END);
+        long n = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        phy = malloc((size_t)n + 1);
+        if (phy)
+            phy[fread(phy, 1, (size_t)n, pf)] = 0;
+        fclose(pf);
+    }
+    car_params_parse(&g_params, phy);
+    plog("physics: %s", phy ? path : "built-in McQueen values");
+    free(phy);
+
     snprintf(path, sizeof path, DATA_ROOT "%s/anims.txt", code);
     FILE *f = fopen(path, "r");
     if (f) {
@@ -183,6 +202,9 @@ static int load_character(const char *code)
                   g_model.n_batch, g_n_anims);
     if (g_n_anims)
         g_cur = 0;
+    for (int i = 0; i < g_n_anims && g_n_idle < 8; i++)
+        if (strstr(g_anims[i].name, "_beft_idle"))
+            g_idle[g_n_idle++] = i;
     return 0;
 }
 
@@ -321,7 +343,7 @@ static int load_scene(int index)
     plog("geometry uploaded: %u KB", bytes / 1024);
     r = col_build(&g_col, &g_scene);
     plog("collision: %d, %u triangles, grid %dx%d", r, g_col.n_tri, g_col.nx, g_col.nz);
-    car_spawn(&g_car, &g_col, g_scene.start, atan2f(g_scene.start_dir[0], g_scene.start_dir[2]));
+    car_spawn(&g_car, &g_params, &g_col, g_scene.start, atan2f(g_scene.start_dir[0], g_scene.start_dir[2]));
     g_scene_loaded = 1;
     sceClibPrintf("[pixcars] scene %s: %u meshes, %u instances\n", g_scene_names[index],
                   g_scene.n_mesh, g_scene.n_inst);
@@ -458,7 +480,7 @@ static void set_camera(float yaw, float pitch, float dist, const float target[3]
 }
 
 /* Bind pose with the wheels steered, rolled and following the suspension. */
-static void pose_car(const Car *c)
+static void pose_car(const Car *c, const VcaAnim *anim, float t)
 {
     float saved[8][16];
     for (int w = 0; w < 4; w++) {
@@ -478,7 +500,7 @@ static void pose_car(const Car *c)
             vcm_mat_mul(Rx, saved[4 + w], L);
         }
     }
-    vcm_pose(&g_model, NULL, 0);
+    vcm_pose(&g_model, anim, t);
     vcm_skin(&g_model);
     for (int w = 0; w < 4; w++) {
         if (g_wroot[w] >= 0)
@@ -544,7 +566,8 @@ int main(void)
     float t = 0.0f;
     int paused = 0, lighting = 1, driving = have_char;
     float chase[3] = { 0, 0, 0 };
-    int chase_init = 0;
+    int chase_init = 0, idle_anim = -1;
+    float parked_t = 0, idle_t = 0;
     uint32_t prev_buttons = 0;
     SceUInt64 last = sceKernelGetProcessTimeWide();
 
@@ -589,24 +612,48 @@ int main(void)
             in.handbrake = (pad.buttons & SCE_CTRL_CIRCLE) != 0;
             if (pressed & SCE_CTRL_DOWN) {
                 float yaw_now = atan2f(g_car.rot[6], g_car.rot[8]);
-                car_spawn(&g_car, &g_col, g_car.pos, yaw_now);
+                car_spawn(&g_car, &g_params, &g_col, g_car.pos, yaw_now);
             }
             car_step(&g_car, &g_col, &in, dt);
 
-            /* chase camera: behind and above, smoothed */
+            /* parked with no input: play one of the game's idle animations, then wait again */
+            int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || fabsf(car_speed(&g_car)) > 0.5f;
+            parked_t = active ? 0 : parked_t + dt;
+            if (active)
+                idle_anim = -1;
+            if (idle_anim < 0 && g_n_idle && parked_t > 5.0f) { /* shortcut: 5 s trigger is a guess */
+                idle_anim = g_idle[rand() % g_n_idle];
+                idle_t = 0;
+            }
+            const VcaAnim *ia = NULL;
+            if (idle_anim >= 0) {
+                idle_t += dt;
+                if (idle_t >= vca_duration(&g_anims[idle_anim].anim)) {
+                    idle_anim = -1;
+                    parked_t = 0;
+                } else {
+                    ia = &g_anims[idle_anim].anim;
+                }
+            }
+
+            /* chase camera from the .phy: CameraOffset above the car, CameraFollowingDistance behind */
+            float M[16];
+            car_matrix(&g_car, M);
+            const float *co = g_params.cam_offset;
             float fx = g_car.rot[6], fz = g_car.rot[8], fl = sqrtf(fx * fx + fz * fz);
             if (fl < 1e-3f) { fx = 0; fz = 1; fl = 1; }
-            float want[3] = { g_car.pos[0] - fx / fl * 22.0f, g_car.pos[1] + 8.0f, g_car.pos[2] - fz / fl * 22.0f };
+            float tgt[3] = { M[12] + co[0], M[13] + co[1], M[14] + co[2] };
+            float want[3] = { tgt[0] - fx / fl * g_params.cam_distance, tgt[1], tgt[2] - fz / fl * g_params.cam_distance };
             float k = chase_init ? fminf(1.0f, 6.0f * dt) : 1.0f;
             for (int c = 0; c < 3; c++)
                 chase[c] += (want[c] - chase[c]) * k;
             chase_init = 1;
-            float look[3] = { g_car.pos[0] - chase[0], g_car.pos[1] + 2.5f - chase[1], g_car.pos[2] - chase[2] };
+            float look[3] = { tgt[0] - chase[0], tgt[1] - chase[1], tgt[2] - chase[2] };
             float ll = sqrtf(look[0] * look[0] + look[1] * look[1] + look[2] * look[2]);
             memcpy(cam, chase, sizeof cam);
             cyaw = atan2f(look[0], look[2]);
             cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
-            pose_car(&g_car);
+            pose_car(&g_car, ia, idle_t);
         }
 
         if (mode == 1) {

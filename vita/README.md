@@ -17,7 +17,7 @@ Sin filtros convierte todas las animaciones del personaje (McQueen tiene 337).
 ## 2. Copiar a la Vita
 
 Copia el contenido de `extracted/vita/mcq/` a `ux0:data/pixcars/mcq/`
-(VitaShell por FTP o USB): `model.vcm`, los `.vca` y `anims.txt`.
+(VitaShell por FTP o USB): `model.vcm`, los `.vca`, `anims.txt` y `mcq.phy`.
 
 ## 3. Compilar
 
@@ -54,8 +54,11 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 | Cruceta ↓ | Recolocar el coche (derecho, en el sitio) |
 | △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
 
-La física (`src/car.c`) es un sólido rígido con 4 ruedas: suspensión por rayos contra la
-geometría sólida del escenario, agarre con círculo de fricción y choques contra paredes.
+La física (`src/car.c`) usa los parámetros del propio juego, `mcq.phy` (lo copia
+`vitaconv.py char`): peso, centro de gravedad, inercia, suspensión y radio por rueda,
+curvas de fuerza de neumático (fórmula del ELF de PS2), curva HP/RPM, marchas y cambios
+automáticos, frenos, aerodinámica, curva de dirección por velocidad y cámara. Parado
+5 s, McQueen reproduce sus animaciones `beft_idle` originales.
 
 Si la pantalla se queda roja, no encuentra `ux0:data/pixcars/mcq/model.vcm`.
 
@@ -71,9 +74,9 @@ gcc -O2 -std=c99 -Ivita/src vita/src/vcm.c vita/tests/host_test.c -lm -o host_te
 Imprime los vértices deformados; coinciden con `tools/pose.py` (error < 0,012 unidades,
 por los pesos de hueso cuantizados a 8 bits).
 
-Física del coche (plano, giro, frenada, pared y, opcional, un escenario real):
+Física del coche (lectura del `.phy`, plano, aceleración y marchas, giro, frenada, marcha atrás, pared y, opcional, un escenario real):
 
 ```bash
 gcc -O2 -std=c99 -Ivita/src vita/src/car.c vita/src/scene.c vita/src/vcm.c vita/tests/car_test.c -lm -o car_test
-./car_test extracted/vita/scene/rs.vcs
+./car_test extracted/vita/mcq/mcq.phy extracted/vita/scene/rs.vcs
 ```

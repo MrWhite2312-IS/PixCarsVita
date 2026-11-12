@@ -4,8 +4,10 @@
 #include "car.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* ------------------------------------------------------------------ vectors */
 static float dot3(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -25,8 +27,8 @@ static float norm3(float v[3])
 
 /* ------------------------------------------------------------------ collision grid */
 #define MAX_CELLS (1u << 20)
-#define MAX_TRI_CELLS 16384 /* shortcut: bigger triangles (sky dome) are left out of the grid;
-                               raise if some huge ground triangle turns out to be missing */
+#define MAX_TRI_CELLS 4096  /* bigger triangles go to one extra "big" cell every query scans */
+#define BIG_CELL(w) ((uint32_t)((w)->nx * (w)->nz))
 
 static void cell_range(const ColWorld *w, float xa, float xb, float za, float zb, int r[4])
 {
@@ -73,7 +75,7 @@ int col_build_tris(ColWorld *w, const float *tris, uint32_t n_tri)
     w->nx = (int)((xb - xa) / w->cell) + 1;
     w->nz = (int)((zb - za) / w->cell) + 1;
     uint32_t ncell = (uint32_t)(w->nx * w->nz);
-    w->cell_start = calloc(ncell + 1, 4);
+    w->cell_start = calloc(ncell + 2, 4);
     if (!w->cell_start)
         return -2;
     /* two passes: count per cell, then fill */
@@ -81,11 +83,12 @@ int col_build_tris(ColWorld *w, const float *tris, uint32_t n_tri)
         for (uint32_t i = 0; i < n_tri; i++) {
             int r[4];
             tri_range(w, w->tri + i * 9, r);
-            if ((r[1] - r[0] + 1) * (r[3] - r[2] + 1) > MAX_TRI_CELLS)
-                continue;
+            int big = (r[1] - r[0] + 1) * (r[3] - r[2] + 1) > MAX_TRI_CELLS;
+            if (big)
+                r[1] = r[0], r[3] = r[2];
             for (int z = r[2]; z <= r[3]; z++)
                 for (int x = r[0]; x <= r[1]; x++) {
-                    uint32_t c = (uint32_t)(z * w->nx + x);
+                    uint32_t c = big ? ncell : (uint32_t)(z * w->nx + x);
                     if (pass == 0)
                         w->cell_start[c + 1]++;
                     else
@@ -93,14 +96,14 @@ int col_build_tris(ColWorld *w, const float *tris, uint32_t n_tri)
                 }
         }
         if (pass == 0) {
-            for (uint32_t c = 0; c < ncell; c++)
+            for (uint32_t c = 0; c <= ncell; c++)
                 w->cell_start[c + 1] += w->cell_start[c];
-            w->items = malloc(4u * (w->cell_start[ncell] + 1));
+            w->items = malloc(4u * (w->cell_start[ncell + 1] + 1));
             if (!w->items)
                 return -2;
         } else {
             /* the fill advanced each start to the next cell's start: shift back */
-            memmove(w->cell_start + 1, w->cell_start, 4u * ncell);
+            memmove(w->cell_start + 1, w->cell_start, 4u * (ncell + 1));
             w->cell_start[0] = 0;
         }
     }
@@ -191,9 +194,9 @@ int col_raycast(const ColWorld *w, const float o[3], const float d[3], float max
     cell_range(w, fminf(o[0], ex), fmaxf(o[0], ex), fminf(o[2], ez), fmaxf(o[2], ez), r);
     float best = maxt;
     int hit = -1;
-    for (int z = r[2]; z <= r[3]; z++)
-        for (int x = r[0]; x <= r[1]; x++) {
-            uint32_t c = (uint32_t)(z * w->nx + x);
+    for (int z = r[2]; z <= r[3] + 1; z++) /* last row: the big cell, once */
+        for (int x = r[0]; x <= (z > r[3] ? r[0] : r[1]); x++) {
+            uint32_t c = z > r[3] ? BIG_CELL(w) : (uint32_t)(z * w->nx + x);
             for (uint32_t k = w->cell_start[c]; k < w->cell_start[c + 1]; k++) {
                 float t;
                 uint32_t i = w->items[k];
@@ -256,9 +259,9 @@ static float sphere_push(const ColWorld *w, const float p[3], float rad, float n
     int r[4];
     cell_range(w, p[0] - rad, p[0] + rad, p[2] - rad, p[2] + rad, r);
     float best = 0;
-    for (int z = r[2]; z <= r[3]; z++)
-        for (int x = r[0]; x <= r[1]; x++) {
-            uint32_t c = (uint32_t)(z * w->nx + x);
+    for (int z = r[2]; z <= r[3] + 1; z++) /* last row: the big cell, once */
+        for (int x = r[0]; x <= (z > r[3] ? r[0] : r[1]); x++) {
+            uint32_t c = z > r[3] ? BIG_CELL(w) : (uint32_t)(z * w->nx + x);
             for (uint32_t k = w->cell_start[c]; k < w->cell_start[c + 1]; k++) {
                 float q[3], d[3];
                 closest_on_tri(p, w->tri + w->items[k] * 9, q);
@@ -276,28 +279,216 @@ static float sphere_push(const ColWorld *w, const float p[3], float rad, float n
     return best;
 }
 
+/* ------------------------------------------------------------------ car parameters */
+/* McQueen's mcq.phy values, used for keys a .phy does not set */
+static const CarParams MCQ_DEFAULTS = {
+    .weight = 3000, .gravity_scale = 1.2f, .inertia_scale = { 0.5f, 1, 1 }, .cofg = { 0, -0.2f, 0.7f },
+    .restitution = 0.2f, .body_friction = 0.2f, .yaw_rate_limit = 10, .normal_load_scale = 1,
+    .handbrake_scale = 0.43f,
+    .tire = {
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000 },
+        { 0.7f, 8, 1.4f, 1.25f, 0.3f, 0.3f, 35, { 1, 1.2f, 6.2f, 6.2f }, { 1.5f, 2, 10.2f, 1 }, 2000 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000 },
+        { 0.9f, 8, 1.4f, 1.45f, 0.3f, 0.3f, 0, { 1, 1.2f, 7.4f, 6 }, { 1.5f, 2, 13.6f, 1 }, 2000 },
+    },
+    .drivetrain = 1, .n_rpm = 8, .n_gears = 5,
+    .rpm = { 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000 },
+    .hp = { 0, 115, 225, 325, 435, 495, 540, 495 },
+    .gear = { 6, 3.2f, 2.4f, 1.7f, 1.7f }, .final_ratio = 1.95f, .loss = 18, .min_rpm = 100,
+    .engine_braking = 10,
+    .low_rpm = 1000, .low_up = 5500, .low_down = 2000, .high_rpm = 1500, .high_up = 6700, .high_down = 4500,
+    .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
+    .aero_area = 35, .aero_drag = 0.3f,
+    .steer_power = 2, .x_rate = 25, .gas_rate = 4, .brake_rate = 20, .reverse_steer = 0.4f,
+    .steer_speed = { 0, 80, 100 }, .steer_scale = { 0.6f, 0.23f, 0.28f },
+    .cam_offset = { 0, 6, 0 }, .cam_distance = 16,
+};
+
+/* value of key in [section] (case-insensitive), or NULL */
+static const char *ini_find(const char *text, const char *section, const char *key)
+{
+    size_t sl = strlen(section), kl = strlen(key);
+    int in = 0;
+    for (const char *l = text; l && *l; l = strchr(l, '\n'), l = l ? l + 1 : NULL) {
+        while (*l == ' ' || *l == '\t')
+            l++;
+        if (*l == '[') {
+            const char *e = strchr(l, ']');
+            in = e && (size_t)(e - l - 1) == sl && strncasecmp(l + 1, section, sl) == 0;
+        } else if (in && strncasecmp(l, key, kl) == 0) {
+            const char *q = l + kl;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (*q == '=')
+                return q + 1;
+        }
+    }
+    return NULL;
+}
+
+static void ini_f(const char *t, const char *sec, const char *key, float *out, int n)
+{
+    const char *v = ini_find(t, sec, key);
+    for (int i = 0; v && i < n; i++) {
+        char *end;
+        float f = strtof(v, &end);
+        if (end == v)
+            return;
+        out[i] = f;
+        v = end;
+        while (*v == 'f' || *v == ' ' || *v == ',')
+            v++;
+    }
+}
+
+static void ini_curve(const char *t, const char *sec, const char *pre, TireCurve *c)
+{
+    char k[64];
+    snprintf(k, sizeof k, "%sRoundOff", pre); ini_f(t, sec, k, &c->round_off, 1);
+    snprintf(k, sizeof k, "%sDropOff", pre); ini_f(t, sec, k, &c->drop_off, 1);
+    snprintf(k, sizeof k, "%sScale", pre); ini_f(t, sec, k, &c->scale, 1);
+    snprintf(k, sizeof k, "%sSpeedScale", pre); ini_f(t, sec, k, &c->speed_scale, 1);
+}
+
+void car_params_parse(CarParams *p, const char *t)
+{
+    *p = MCQ_DEFAULTS;
+    if (!t)
+        return;
+    const char *M = "Mass Properties";
+    ini_f(t, M, "Weight", &p->weight, 1);
+    ini_f(t, M, "GravityScale", &p->gravity_scale, 1);
+    ini_f(t, M, "InertiaScale", p->inertia_scale, 3);
+    ini_f(t, M, "CofG", p->cofg, 3);
+    ini_f(t, M, "Restitution", &p->restitution, 1);
+    ini_f(t, M, "BodyFriction", &p->body_friction, 1);
+    ini_f(t, M, "YawRateLimit", &p->yaw_rate_limit, 1);
+    ini_f(t, M, "NormalLoadScale", &p->normal_load_scale, 1);
+    ini_f(t, "Powerslide", "HandBrakeFrictionScale", &p->handbrake_scale, 1);
+    static const char *TN[4] = { "FrontLeftTire", "FrontRightTire", "RearLeftTire", "RearRightTire" };
+    for (int i = 0; i < 4; i++) {
+        TireParams *tp = &p->tire[i];
+        char s[64];
+        ini_f(t, TN[i], "MaxCompression", &tp->max_comp, 1);
+        ini_f(t, TN[i], "MaxCompressionRate", &tp->max_comp_rate, 1);
+        ini_f(t, TN[i], "TireRadius", &tp->radius, 1);
+        ini_f(t, TN[i], "Spring", &tp->spring, 1);
+        ini_f(t, TN[i], "BounceDampingRatio", &tp->bounce_damp, 1);
+        ini_f(t, TN[i], "ReboundDampingRatio", &tp->rebound_damp, 1);
+        ini_f(t, TN[i], "MaxSteerAngle", &tp->max_steer, 1);
+        snprintf(s, sizeof s, "%s Surface 1", TN[i]);
+        ini_curve(t, s, "SideForce", &tp->side);
+        ini_curve(t, s, "DriveForce", &tp->drive);
+        ini_f(t, s, "MaxBrakingTorque", &tp->max_brake_torque, 1);
+    }
+    const char *E = "Engine";
+    float f = (float)p->drivetrain;
+    ini_f(t, E, "DriveTrain", &f, 1);
+    p->drivetrain = (int)f;
+    f = (float)p->n_rpm;
+    ini_f(t, E, "NumberOfRPMPoints", &f, 1);
+    if (f >= 2 && f <= 16) {
+        p->n_rpm = (int)f;
+        for (int i = 0; i < p->n_rpm; i++) {
+            char k[24];
+            snprintf(k, sizeof k, "RPM%d", i + 1); ini_f(t, E, k, &p->rpm[i], 1);
+            snprintf(k, sizeof k, "HP%d", i + 1); ini_f(t, E, k, &p->hp[i], 1);
+        }
+    }
+    f = (float)p->n_gears;
+    ini_f(t, E, "NumberOfGears", &f, 1);
+    if (f >= 1 && f <= 8) {
+        p->n_gears = (int)f;
+        for (int i = 0; i < p->n_gears; i++) {
+            char k[24];
+            snprintf(k, sizeof k, "GearRatio%d", i + 1);
+            ini_f(t, E, k, &p->gear[i], 1);
+        }
+    }
+    ini_f(t, E, "FinalGearRatio", &p->final_ratio, 1);
+    ini_f(t, E, "TransmissionLoss", &p->loss, 1);
+    ini_f(t, E, "MinRPM", &p->min_rpm, 1);
+    ini_f(t, E, "EngineBraking", &p->engine_braking, 1);
+    ini_f(t, E, "LowLoadRPM", &p->low_rpm, 1);
+    ini_f(t, E, "LowLoadUpShiftRPM", &p->low_up, 1);
+    ini_f(t, E, "LowLoadDownShiftRPM", &p->low_down, 1);
+    ini_f(t, E, "HighLoadRPM", &p->high_rpm, 1);
+    ini_f(t, E, "HighLoadUpShiftRPM", &p->high_up, 1);
+    ini_f(t, E, "HighLoadDownShiftRPM", &p->high_down, 1);
+    ini_f(t, E, "ShiftUpDuration", &p->shift_up_time, 1);
+    ini_f(t, E, "ShiftUpThrottle", &p->shift_up_throttle, 1);
+    ini_f(t, E, "ShiftDownDuration", &p->shift_down_time, 1);
+    ini_f(t, E, "ShiftDownThrottle", &p->shift_down_throttle, 1);
+    float cur = 0;
+    ini_f(t, "Tune Ups", "CurrentTuneUp", &cur, 1);
+    if (cur >= 1) {
+        char s[32];
+        snprintf(s, sizeof s, "Tune Up %d", (int)cur);
+        ini_f(t, s, "AeroSurfaceArea", &p->aero_area, 1);
+        ini_f(t, s, "AeroDrag", &p->aero_drag, 1);
+    }
+    const char *J = "Joystick";
+    ini_f(t, J, "SteeringInputPower", &p->steer_power, 1);
+    ini_f(t, J, "XAxisRateLimit", &p->x_rate, 1);
+    ini_f(t, J, "GasRateLimit", &p->gas_rate, 1);
+    ini_f(t, J, "BrakeRateLimit", &p->brake_rate, 1);
+    ini_f(t, J, "ReverseSteerScale", &p->reverse_steer, 1);
+    for (int i = 0; i < 3; i++) {
+        char k[24];
+        snprintf(k, sizeof k, "SteerSpeed%d", i + 1); ini_f(t, J, k, &p->steer_speed[i], 1);
+        snprintf(k, sizeof k, "SteerScale%d", i + 1); ini_f(t, J, k, &p->steer_scale[i], 1);
+    }
+    ini_f(t, "Camera Properties", "CameraOffset", p->cam_offset, 3);
+    ini_f(t, "Camera Properties", "CameraFollowingDistance", &p->cam_distance, 1);
+}
+
 /* ------------------------------------------------------------------ car */
-#define GRAVITY 48.0f        /* ft/s^2, a bit above 32 for an arcade feel */
-#define COM_Y 1.2f           /* centre of mass above the model origin */
-#define WHEEL_R 1.48f
-#define REST 0.9f            /* suspension travel from mount to wheel centre, unloaded */
-#define SAG 0.3f             /* static compression */
-#define MOUNT_Y (0.96f - COM_Y + REST - SAG) /* wheel centre sits at bind height at rest */
-#define K_SPRING (GRAVITY / (4.0f * SAG))
-#define C_DAMP (0.45f * 2.0f * sqrtf(K_SPRING * 0.25f)) /* 0.45 of critical per wheel */
-#define ENGINE 34.0f         /* ft/s^2 at full throttle */
-#define BRAKE 60.0f
-#define DRAG 0.0018f         /* top speed ~ sqrt(ENGINE/DRAG) ~ 137 ft/s (93 mph) */
-#define MU 1.35f
-#define GRIP 0.3f            /* share of slip cancelled per substep */
-#define MAX_STEER 0.55f
+#define G_FT 32.174f         /* ft/s^2; weights are in pounds, forces in lbf, mass in slugs */
+#define RHO_AIR 0.00238f     /* slug/ft^3, sea level */
+#define MPH 0.681818f        /* mph per ft/s */
+#define BIND_WHEEL_Y 0.96f   /* wheel centre height in McQueen's bind pose (wheel*_root nodes) */
 
 static const float WX[4] = { -2.43f, 2.43f, -2.69f, 2.69f };
 static const float WZ[4] = { 4.55f, 4.55f, -3.9f, -3.9f };
-static const float INERTIA[3] = { 42.0f, 23.0f, 14.0f }; /* roll/yaw/pitch axes padded for stability */
-static const float PROBE[5][3] = { { 0, 0.5f, 4.6f }, { 0, 0.5f, -4.6f }, { 0, 0.5f, 0 },
-                                   { -1.9f, 0.5f, 0 }, { 1.9f, 0.5f, 0 } };
-#define PROBE_R 1.6f
+static const float BOX[3] = { 7.14f, 5.36f, 15.17f }; /* model extents: inertia of a solid box */
+/* body spheres, relative to the centre of mass (which the .phy puts only ~0.25 ft above the
+   ground): kept clear of the road so only the bodywork touches walls */
+static const float PROBE[5][3] = { { 0, 1.6f, 4.2f }, { 0, 1.6f, -4.4f }, { 0, 1.8f, 0 },
+                                   { -2.0f, 1.6f, 0 }, { 2.0f, 1.6f, 0 } };
+#define PROBE_R 1.3f
+
+static float curve(const TireCurve *c, float x)
+{
+    float a = fabsf(c->round_off * c->speed_scale * x);
+    return c->scale * c->speed_scale * x / (1.0f + powf(a, c->drop_off));
+}
+
+/* peak of the curve over x in [0, xmax] (the game tabulates 64 steps over that range) */
+static float curve_peak(const TireCurve *c, float xmax)
+{
+    float best = 0;
+    for (int i = 1; i <= 64; i++)
+        best = fmaxf(best, curve(c, xmax * i / 64.0f));
+    return best;
+}
+
+static float mass(const CarParams *p) { return p->weight / G_FT; }
+static float gravity(const CarParams *p) { return G_FT * p->gravity_scale; }
+static float front_share(const CarParams *p) { return (p->cofg[2] - WZ[2]) / (WZ[0] - WZ[2]); }
+static float static_load(const CarParams *p, int i)
+{
+    float f = front_share(p);
+    return mass(p) * gravity(p) * (i < 2 ? f : 1 - f) * 0.5f;
+}
+/* shortcut: Spring is a "scale factor" with no stated base; read as load / MaxCompression,
+   so the static sag is MaxCompression / Spring. Upgrade once the PS2 vehicle code is decoded. */
+static float spring_k(const CarParams *p, int i) { return p->tire[i].spring * static_load(p, i) / p->tire[i].max_comp; }
+static float static_sag(const CarParams *p, int i) { return p->tire[i].max_comp / p->tire[i].spring; }
+static float mount_y(const CarParams *p, int i)
+{
+    /* wheel centre at its bind height when the strut sits at static sag */
+    return BIND_WHEEL_Y - p->cofg[1] + p->tire[i].max_comp - static_sag(p, i);
+}
 
 static void to_world(const Car *c, const float l[3], float o[3])
 {
@@ -305,15 +496,17 @@ static void to_world(const Car *c, const float l[3], float o[3])
         o[k] = c->pos[k] + l[0] * c->rot[k] + l[1] * c->rot[3 + k] + l[2] * c->rot[6 + k];
 }
 
-void car_spawn(Car *c, const ColWorld *w, const float pos[3], float yaw)
+void car_spawn(Car *c, const CarParams *p, const ColWorld *w, const float pos[3], float yaw)
 {
     /* pos may alias c->pos (reset in place): read it before clearing the car; start the ray just
        above so a reset under a bridge lands on the road, not on top */
     float o[3] = { pos[0], pos[1] + 10.0f, pos[2] }, d[3] = { 0, -1, 0 }, t, n[3];
     memset(c, 0, sizeof *c);
+    c->p = p;
+    c->gear = 1;
     c->pos[0] = o[0];
     c->pos[2] = o[2];
-    c->pos[1] = col_raycast(w, o, d, 4000.0f, &t, n) ? o[1] - t + 2.5f : o[1] - 10.0f;
+    c->pos[1] = col_raycast(w, o, d, 4000.0f, &t, n) ? o[1] - t + 3.0f : o[1] - 10.0f;
     float s = sinf(yaw), co = cosf(yaw);
     float rot[9] = { co, 0, -s, 0, 1, 0, s, 0, co };
     memcpy(c->rot, rot, sizeof rot);
@@ -321,29 +514,90 @@ void car_spawn(Car *c, const ColWorld *w, const float pos[3], float yaw)
 
 float car_speed(const Car *c) { return dot3(c->vel, c->rot + 6); }
 
-static void substep(Car *c, const ColWorld *w, const CarInput *in, float h)
+static float interp(const float *xs, const float *ys, int n, float x)
 {
+    if (x <= xs[0])
+        return ys[0];
+    for (int i = 1; i < n; i++)
+        if (x <= xs[i])
+            return ys[i - 1] + (ys[i] - ys[i - 1]) * (x - xs[i - 1]) / (xs[i] - xs[i - 1]);
+    return ys[n - 1];
+}
+
+/* Engine torque at the driven hubs (lb-ft, total), updating rpm and the automatic gearbox. */
+static float drivetrain(Car *c, float dt)
+{
+    const CarParams *p = c->p;
+    float r = p->tire[2].radius;
+    float wheel = car_speed(c) / r;                   /* rad/s of the driven (rear) wheels */
+    int reverse = c->gear < 0;
+    float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
+    float rpm = fabsf(wheel) * ratio * 60.0f / (2.0f * 3.14159265f);
+    float load = reverse ? c->brake : c->gas;
+    int high = load > 0.5f;
+    /* automatic shifts at the game's load-dependent RPMs */
+    if (!reverse && c->shift_t <= 0) {
+        if (rpm > (high ? p->high_up : p->low_up) && c->gear < p->n_gears) {
+            c->gear++;
+            c->shift_t = p->shift_up_time;
+        } else if (rpm < (high ? p->high_down : p->low_down) && c->gear > 1) {
+            c->gear--;
+            c->shift_t = -p->shift_down_time; /* negative: downshift in progress */
+        }
+    }
+    float shift_scale = 1;
+    if (c->shift_t > 0) {
+        shift_scale = p->shift_up_throttle;
+        c->shift_t = fmaxf(0, c->shift_t - dt);
+    } else if (c->shift_t < 0) {
+        shift_scale = p->shift_down_throttle;
+        c->shift_t = fminf(0, c->shift_t + dt);
+    }
+    /* clutch slip below the load RPM lets the car launch */
+    float rpm_eff = fmaxf(rpm, load > 0 ? (high ? p->high_rpm : p->low_rpm) : p->min_rpm);
+    c->rpm = rpm_eff;
+    float torque = 0;
+    if (load > 0 && rpm_eff < p->rpm[p->n_rpm - 1])
+        torque = interp(p->rpm, p->hp, p->n_rpm, rpm_eff) * 5252.0f / rpm_eff * load * shift_scale;
+    else if (load <= 0)
+        torque = -p->engine_braking * (wheel > 0 ? 1 : -1) * (fabsf(wheel) > 0.5f);
+    float hub = torque * ratio * (1.0f - p->loss / 100.0f);
+    return reverse ? -hub : hub;
+}
+
+static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, float h)
+{
+    const CarParams *p = c->p;
     float *r = c->rot, *u = c->rot + 3, *f = c->rot + 6;
-    float F[3] = { 0, -GRAVITY, 0 }, T[3] = { 0, 0, 0 };
-    float fwd_speed = dot3(c->vel, f);
+    float m = mass(p), g = gravity(p);
+    float F[3] = { 0, -g * m, 0 }, T[3] = { 0, 0, 0 };
     int grounded = 0;
+    int driven_n = p->drivetrain == 1 ? 2 : (p->drivetrain == 2 ? 4 : 2);
     for (int i = 0; i < 4; i++) {
-        float lm[3] = { WX[i], MOUNT_Y, WZ[i] }, p[3], d[3] = { -u[0], -u[1], -u[2] }, t, n[3];
-        to_world(c, lm, p);
-        float len = REST + WHEEL_R;
-        if (!col_raycast(w, p, d, len, &t, n)) {
+        const TireParams *tp = &p->tire[i];
+        float lm[3] = { WX[i] - p->cofg[0], mount_y(p, i), WZ[i] - p->cofg[2] };
+        float pm[3], d[3] = { -u[0], -u[1], -u[2] }, t, n[3];
+        to_world(c, lm, pm);
+        float len = tp->max_comp + tp->radius;
+        if (!col_raycast(w, pm, d, len, &t, n)) {
             c->comp[i] = 0;
+            c->spin[i] += car_speed(c) / tp->radius * h * 0.98f;
             continue;
         }
         grounded++;
-        float comp = len - t, vcomp = (comp - c->comp[i]) / h;
+        float comp = len - t;
+        float vcomp = (comp - c->comp[i]) / h;
+        vcomp = fmaxf(-tp->max_comp_rate, fminf(tp->max_comp_rate, vcomp));
         c->comp[i] = comp;
-        float fs = K_SPRING * comp + C_DAMP * vcomp;
+        float k = spring_k(p, i), ms = static_load(p, i) / g;
+        float zeta = vcomp > 0 ? tp->bounce_damp : tp->rebound_damp;
+        float fs = k * comp + zeta * 2.0f * sqrtf(k * ms) * vcomp;
+        if (comp > tp->max_comp)
+            fs += k * 20.0f * (comp - tp->max_comp); /* bump stop */
         if (fs < 0)
             fs = 0;
-        float cp[3] = { p[0] + d[0] * t, p[1] + d[1] * t, p[2] + d[2] * t }, arm[3], tq[3], fv[3];
-        /* suspension along the ground normal (along body up it would push a pitched car), at the mount */
-        sub3(p, c->pos, arm);
+        float cp[3] = { pm[0] + d[0] * t, pm[1] + d[1] * t, pm[2] + d[2] * t }, arm[3], tq[3], fv[3];
+        sub3(pm, c->pos, arm);
         fv[0] = n[0] * fs; fv[1] = n[1] * fs; fv[2] = n[2] * fs;
         madd(F, fv, 1);
         cross3(arm, fv, tq);
@@ -352,9 +606,9 @@ static void substep(Car *c, const ColWorld *w, const CarInput *in, float h)
         /* tyre frame on the ground plane */
         float s = i < 2 ? c->steer : 0, cs = cosf(s), sn = sinf(s);
         float wf[3], ws[3];
-        for (int k = 0; k < 3; k++) {
-            wf[k] = f[k] * cs + r[k] * sn;
-            ws[k] = r[k] * cs - f[k] * sn;
+        for (int k2 = 0; k2 < 3; k2++) {
+            wf[k2] = f[k2] * cs + r[k2] * sn;
+            ws[k2] = r[k2] * cs - f[k2] * sn;
         }
         madd(wf, n, -dot3(wf, n));
         madd(ws, n, -dot3(ws, n));
@@ -364,52 +618,64 @@ static void substep(Car *c, const ColWorld *w, const CarInput *in, float h)
         sub3(cp, c->pos, rel);
         cross3(c->angvel, rel, vc);
         madd(vc, c->vel, 1);
-        float vf = dot3(vc, wf), vs = dot3(vc, ws), share = 0.25f / h;
+        float vf = dot3(vc, wf), vs = dot3(vc, ws);
+        float fn = fs * p->normal_load_scale;
+        float cap = ms / h;                           /* force that cancels the slip this step */
         int rear = i >= 2;
-        float flat = -vs * share * GRIP * (rear && in->handbrake ? 0.35f : 1.0f);
-        float flong = 0;
-        if (in->throttle > 0)
-            flong += in->throttle * ENGINE * 0.25f;
-        if (in->brake > 0) {
-            if (fwd_speed > 3.0f)
-                flong -= fminf(fabsf(vf) * share, in->brake * BRAKE * 0.25f) * (vf > 0 ? 1 : -1);
-            else
-                flong -= in->brake * ENGINE * 0.5f * 0.25f; /* reverse */
-        }
-        if (rear && in->handbrake)
-            flong -= fminf(fabsf(vf) * share, BRAKE * 0.25f) * (vf > 0 ? 1 : -1);
-        flong -= vf * 0.25f * 0.25f; /* rolling resistance */
-        if (in->throttle <= 0 && in->brake <= 0 && fabsf(vf) < 2.0f)
-            flong -= vf * share * GRIP; /* parked: static friction holds the car */
-        float maxf = MU * fs, mag = sqrtf(flat * flat + flong * flong);
-        if (mag > maxf && mag > 0) {
-            flat *= maxf / mag;
-            flong *= maxf / mag;
+
+        /* lateral: slip angle into the game's side-force curve (tabulated over 0..pi/2) */
+        float alpha = atan2f(fabsf(vs), fmaxf(fabsf(vf), 3.0f));
+        float fy = -(vs > 0 ? 1.0f : -1.0f) * curve(&tp->side, alpha) * fn;
+        if (rear && handbrake)
+            fy *= p->handbrake_scale;
+        if (fabsf(fy) > fabsf(vs) * cap)
+            fy = -vs * cap;
+
+        /* longitudinal: hub torques, limited by the drive-force curve (slip 0..1) */
+        int driven = p->drivetrain == 2 || (p->drivetrain == 1 ? rear : !rear);
+        float fx = driven ? hub_torque / driven_n / tp->radius : 0;
+        float brake = (c->gear > 0 ? c->brake : 0) * tp->max_brake_torque / tp->radius;
+        if (rear && handbrake)
+            brake = fmaxf(brake, tp->max_brake_torque / tp->radius);
+        fx -= fminf(brake, fabsf(vf) * cap) * (vf > 0 ? 1 : -1);
+        float peak = curve_peak(&tp->drive, 1.0f) * fn;
+        float slide = curve(&tp->drive, 1.0f) * fn;
+        int slipping = fabsf(fx) > peak;
+        if (slipping)
+            fx = (fx > 0 ? 1 : -1) * slide;
+        /* friction ellipse between the two curves' peaks */
+        float py = curve_peak(&tp->side, 1.5707963f) * fn;
+        float e = (py > 0 && peak > 0) ? (fx / peak) * (fx / peak) + (fy / py) * (fy / py) : 0;
+        if (e > 1) {
+            float sc = 1.0f / sqrtf(e);
+            fx *= sc;
+            fy *= sc;
         }
         float ft[3] = { 0, 0, 0 };
-        madd(ft, wf, flong);
-        madd(ft, ws, flat);
+        madd(ft, wf, fx);
+        madd(ft, ws, fy);
         madd(F, ft, 1);
-        /* apply tyre forces closer to the centre of mass height: less body roll */
-        madd(cp, u, -0.7f * dot3(rel, u));
         sub3(cp, c->pos, arm);
         cross3(arm, ft, tq);
         madd(T, tq, 1);
-        c->spin[i] += vf / WHEEL_R * h;
+        c->spin[i] += (slipping && driven ? (fx > 0 ? 1.5f : 0.0f) : 1.0f) * vf / tp->radius * h;
     }
     c->grounded = grounded;
     float sp = sqrtf(dot3(c->vel, c->vel));
-    madd(F, c->vel, -DRAG * sp);
+    madd(F, c->vel, -0.5f * RHO_AIR * p->aero_drag * p->aero_area * sp);
 
-    madd(c->vel, F, h);
+    madd(c->vel, F, h / m);
     madd(c->pos, c->vel, h);
-    /* angular: torque to body frame, divide by inertia, back to world */
-    float ab[3] = { dot3(T, r) / INERTIA[0], dot3(T, u) / INERTIA[1], dot3(T, f) / INERTIA[2] };
-    madd(c->angvel, r, ab[0] * h);
-    madd(c->angvel, u, ab[1] * h);
-    madd(c->angvel, f, ab[2] * h);
-    float damp = 1.0f - (grounded ? 1.5f : 0.3f) * h;
-    c->angvel[0] *= damp; c->angvel[1] *= damp; c->angvel[2] *= damp;
+    /* angular: torque to body frame, divide by inertia (x pitch, y yaw, z roll), back to world */
+    float I[3] = { m * (BOX[1] * BOX[1] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[0],
+                   m * (BOX[0] * BOX[0] + BOX[2] * BOX[2]) / 12 * p->inertia_scale[1],
+                   m * (BOX[0] * BOX[0] + BOX[1] * BOX[1]) / 12 * p->inertia_scale[2] };
+    madd(c->angvel, r, dot3(T, r) / I[0] * h);
+    madd(c->angvel, u, dot3(T, u) / I[1] * h);
+    madd(c->angvel, f, dot3(T, f) / I[2] * h);
+    float yr = dot3(c->angvel, u);
+    if (fabsf(yr) > p->yaw_rate_limit)
+        madd(c->angvel, u, (yr > 0 ? p->yaw_rate_limit : -p->yaw_rate_limit) - yr);
     for (int k = 0; k < 3; k++) {
         float dv[3];
         cross3(c->angvel, c->rot + k * 3, dv);
@@ -420,45 +686,68 @@ static void substep(Car *c, const ColWorld *w, const CarInput *in, float h)
     norm3(r);
     cross3(f, r, u);
 
-    /* body against walls/terrain: push out, kill the inward velocity */
+    /* body against walls/terrain: push out, bounce with the .phy restitution and friction */
     for (int k = 0; k < 5; k++) {
-        float p[3], n[3] = { 0, 1, 0 };
-        to_world(c, PROBE[k], p);
-        float depth = sphere_push(w, p, PROBE_R, n);
+        float pp[3], n[3] = { 0, 1, 0 };
+        to_world(c, PROBE[k], pp);
+        float depth = sphere_push(w, pp, PROBE_R, n);
         if (depth <= 0)
             continue;
         madd(c->pos, n, depth);
         float vn = dot3(c->vel, n);
         if (vn < 0) {
-            madd(c->vel, n, -vn * 1.2f);
-            madd(c->vel, c->vel, -0.02f); /* scrape */
+            madd(c->vel, n, -vn * (1.0f + p->restitution));
+            float vt[3] = { c->vel[0], c->vel[1], c->vel[2] };
+            madd(vt, n, -dot3(vt, n));
+            madd(c->vel, vt, -fminf(1.0f, p->body_friction * -vn / (sqrtf(dot3(vt, vt)) + 1e-3f)));
             c->angvel[0] *= 0.8f; c->angvel[1] *= 0.8f; c->angvel[2] *= 0.8f;
         }
     }
 }
 
+static float rate(float cur, float target, float per_s, float dt)
+{
+    float d = target - cur, m = per_s * dt;
+    return cur + (d > m ? m : (d < -m ? -m : d));
+}
+
 void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
 {
+    const CarParams *p = c->p;
     if (dt > 0.1f)
         dt = 0.1f;
-    float speed = fabsf(car_speed(c));
-    float target = in->steer * MAX_STEER / (1.0f + speed / 70.0f);
-    float rate = 2.5f * dt;
-    c->steer += fmaxf(-rate, fminf(rate, target - c->steer));
+    float speed = car_speed(c);
+    /* reverse: brake held while (nearly) stopped engages reverse; gas engages drive */
+    if (c->gear > 0 && in->brake > 0 && speed < 1.0f && in->throttle <= 0)
+        c->gear = -1;
+    else if (c->gear < 0 && (in->throttle > 0 || (in->brake <= 0 && speed > -1.0f)))
+        c->gear = 1;
+    c->gas = rate(c->gas, in->throttle, p->gas_rate, dt);
+    c->brake = rate(c->brake, in->brake, p->brake_rate, dt);
+    /* steering: input curve, rate limit, speed table (mph), max wheel angle */
+    float x = in->steer;
+    float shaped = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p->steer_power);
+    c->steer_in = rate(c->steer_in, shaped, p->x_rate, dt);
+    float scale = interp(p->steer_speed, p->steer_scale, 3, fabsf(speed) * MPH);
+    if (speed < -1.0f)
+        scale *= p->reverse_steer;
+    c->steer = c->steer_in * scale * p->tire[0].max_steer * 3.14159265f / 180.0f;
+    float hub = drivetrain(c, dt);
     int n = (int)ceilf(dt * 240.0f);
     if (n < 1) n = 1;
     if (n > 24) n = 24;
     for (int i = 0; i < n; i++)
-        substep(c, w, in, dt / n);
+        substep(c, w, hub, in->handbrake, dt / n);
 }
 
 void car_matrix(const Car *c, float out[16])
 {
+    const float *cg = c->p->cofg;
     for (int k = 0; k < 3; k++) {
         out[k] = c->rot[k];
         out[4 + k] = c->rot[3 + k];
         out[8 + k] = c->rot[6 + k];
-        out[12 + k] = c->pos[k] - COM_Y * c->rot[3 + k];
+        out[12 + k] = c->pos[k] - cg[0] * c->rot[k] - cg[1] * c->rot[3 + k] - cg[2] * c->rot[6 + k];
     }
     out[3] = out[7] = out[11] = 0;
     out[15] = 1;
@@ -466,7 +755,7 @@ void car_matrix(const Car *c, float out[16])
 
 float car_wheel_offset(const Car *c, int i)
 {
-    /* wheel centre below the mount: REST - comp (unloaded: full REST); bind is at SAG */
-    float travel = c->comp[i] > 0 ? c->comp[i] : 0;
-    return travel - SAG;
+    /* wheel centre below the mount: max_comp - comp (unloaded: full droop); bind is at static sag */
+    float travel = c->comp[i] > 0 ? fminf(c->comp[i], c->p->tire[i].max_comp) : 0;
+    return travel - static_sag(c->p, i);
 }
