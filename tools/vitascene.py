@@ -19,6 +19,7 @@ Usage:
   vitascene.py <toy-or-scn in paks> <out.vcs> [x z radius] [start=x,y,z] [dir=x,y,z]
       optional x z radius: keep only instances within radius of (x, z)
       start/dir: initial camera position and direction
+      startname=<StartPositionToy name>: spawn there (default Player1Start, else the first)
 """
 import math, os, struct, sys
 
@@ -31,7 +32,26 @@ DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
 SUN = scene.norm((0.45, 0.80, 0.40))
 
 
-def export(idx, key, keep=None, start_override=None, dir_override=None, streamed=None):
+def toy_start_position(idx, key, name=None):
+    """(position, look) of a StartPositionToy in <scene>.toy: `name`, else Player1Start, else the
+    first one listed; None without a toy."""
+    toy = key[:-4] + ".toy"
+    if toy not in idx.files:
+        return None
+    starts = []
+    for sec, kv in dxm.parse_ini(idx.read(toy).decode("latin-1")):
+        s = sec.lower()
+        if s.startswith("startpositiontoy") and s != "startpositiontoys" and "position" in kv:
+            look = scene.vec(kv["lookvector"][1]) if "lookvector" in kv else (0, 0, 1)
+            starts.append((kv.get("name", (0, ""))[1].lower(), scene.vec(kv["position"][1]), look))
+    for want in ([name.lower()] if name else []) + ["player1start"]:
+        for n, p, l in starts:
+            if n == want:
+                return p, l
+    return (starts[0][1], starts[0][2]) if starts else None
+
+
+def export(idx, key, keep=None, start_override=None, dir_override=None, streamed=None, start_name=None):
     """streamed: optional (assets, meshes) from soultree.load/objects: the scene's streamed
     terrain objects (already in world space) plus the bundle's own materials/textures."""
     inst, missing = scene.instances(idx, key)
@@ -152,6 +172,13 @@ def export(idx, key, keep=None, start_override=None, dir_override=None, streamed
     ys = sorted(i[1][13] for i in inst)
     if not start or min(math.dist((start[0], start[2]), (i[1][12], i[1][14])) for i in inst) > 2000:
         start = (xs[len(xs) // 2], ys[len(ys) // 2] + 60, zs[len(zs) // 2])
+    # the game spawns at a [StartPositionToyN] of the scene's .toy (activities name one with
+    # NextStart, e.g. Player1Start): prefer that over SceneInfo's default
+    toy_start = toy_start_position(idx, key, start_name)
+    if toy_start:
+        start, toy_dir = toy_start
+        if not dir_override:
+            dir_override = toy_dir
     if start_override:
         start = start_override
     sdir = scene.norm(dir_override) if dir_override else (1.0, 0.0, 0.0)
@@ -183,7 +210,7 @@ def main():
               if m and not isinstance(m, Exception)]
         streamed = (assets, ms)
         print(f"streamed terrain: {len(ms)} objects")
-    data, nt, nm, nme, ni, missing = export(idx, key, keep, st, di, streamed)
+    data, nt, nm, nme, ni, missing = export(idx, key, keep, st, di, streamed, opts.get("startname"))
     os.makedirs(os.path.dirname(os.path.abspath(a[1])), exist_ok=True)
     open(a[1], "wb").write(data)
     print(f"{a[1]}: {len(data) / 1e6:.1f} MB  textures={nt} materials={nm} meshes={nme} "
