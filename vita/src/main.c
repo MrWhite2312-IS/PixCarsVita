@@ -108,6 +108,22 @@ static int g_idle[8], g_n_idle; /* <char>_beft_idle* animations, played when par
 static const char *LEAN_NAMES[6] = { "_bef_lean_slow", "_bef_lean_fast", "_bef_lean_bck_slow",
                                      "_bef_lean_bck_fast", "_bef_lean_fwd_slow", "_bef_lean_fwd_fast" };
 static int g_lean[6] = { -1, -1, -1, -1, -1, -1 };
+/* eye strips (PS2 slots 4-6), blended with the same signals (0x2b1b00) */
+static const char *EYE_NAMES[3] = { "_e_eyesdown", "_e_eyesmid", "_e_eyesup" };
+static int g_eyes[3] = { -1, -1, -1 };
+
+/* The game poses node groups separately (0x35e140): eyes/lids/brows vs the body. */
+static int eye_group(const char *n)
+{
+    return strstr(n, "Eye_") || strstr(n, "Lid") || strstr(n, "Brow");
+}
+
+static void keep_group(VcaAnim *a, int eyes)
+{
+    for (uint32_t i = 0; i < a->n_tracks; i++)
+        if (eye_group(a->tracks[i].name) != eyes)
+            a->tracks[i].node = -1;
+}
 /* wheel nodes, in car.c order FL, FR, RL, RR: <Char>_wheel*_root (steer, suspension) and
    their child <Char>_wheel* (roll) */
 static const char *WHEEL_NAMES[4] = { "wheelfrontleft", "wheelfrontright", "wheelrearleft", "wheelrearright" };
@@ -237,8 +253,17 @@ static int load_character(const char *code)
     for (int i = 0; i < g_n_anims; i++) {
         for (int k = 0; k < 6; k++) {
             size_t n = strlen(g_anims[i].name), l = strlen(LEAN_NAMES[k]);
-            if (n >= l && strcasecmp(g_anims[i].name + n - l, LEAN_NAMES[k]) == 0)
+            if (n >= l && strcasecmp(g_anims[i].name + n - l, LEAN_NAMES[k]) == 0) {
                 g_lean[k] = i;
+                keep_group(&g_anims[i].anim, 0);
+            }
+        }
+        for (int k = 0; k < 3; k++) {
+            size_t n = strlen(g_anims[i].name), l = strlen(EYE_NAMES[k]);
+            if (n >= l && strcasecmp(g_anims[i].name + n - l, EYE_NAMES[k]) == 0) {
+                g_eyes[k] = i;
+                keep_group(&g_anims[i].anim, 1);
+            }
         }
         if (strstr(g_anims[i].name, "_beft_idle") && g_n_idle < 8)
             g_idle[g_n_idle++] = i;
@@ -569,6 +594,18 @@ static int lean_pose(Lean *ln, const CarInput *in, float speed, float dt,
             n++;
         }
     }
+    if (g_eyes[0] >= 0 && g_eyes[1] >= 0 && g_eyes[2] >= 0) {
+        /* eyes: down <- mid -> up by fore/aft, the strip time by the lateral signal */
+        int e0 = ln->fa < 0.5f ? g_eyes[1] : g_eyes[2], e1 = ln->fa < 0.5f ? g_eyes[0] : g_eyes[1];
+        const int ids[2] = { e0, e1 };
+        const float ws[2] = { f, 1.0f - f };
+        for (int j = 0; j < 2; j++) {
+            a[n] = &g_anims[ids[j]].anim;
+            w[n] = ws[j];
+            t[n] = fminf(ln->lat, 0.999f) * vca_duration(a[n]);
+            n++;
+        }
+    }
     return n;
 }
 
@@ -760,8 +797,8 @@ int main(void)
             memcpy(cam, chase, sizeof cam);
             cyaw = atan2f(look[0], look[2]);
             cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
-            const VcaAnim *pa[4];
-            float pw[4], pt[4];
+            const VcaAnim *pa[6];
+            float pw[6], pt[6];
             int pn;
             if (ia) {
                 pa[0] = ia; pw[0] = 1; pt[0] = idle_t; pn = 1;
