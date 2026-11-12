@@ -727,14 +727,16 @@ static void play_movie(const char *name)
             break;
         prev = pad.buttons;
     }
-    plog("movie %s: %d frames shown", name, movie_frames());
+    plog("movie %s: %d frames shown, %d frame allocs failed", name, movie_frames(), movie_alloc_failures());
     movie_stop();
 }
 
 /* ------------------------------------------------------------------ main */
 int main(void)
 {
-    vglInit(0x800000);
+    /* vglInit grabs all free CDRAM and phycont memory; SceAvPlayer needs both (decoder in
+       phycont, output frames in CDRAM), so leave 16 MB of each outside vitaGL's pools */
+    vglInitWithCustomThreshold(0x800000, 960, 544, 0x1000000, 0x1000000, 0x1000000, 0, SCE_GXM_MULTISAMPLE_NONE);
     vglWaitVblankStart(GL_TRUE);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 

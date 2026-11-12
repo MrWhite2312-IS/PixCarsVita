@@ -20,7 +20,7 @@ static SceAvPlayerHandle g_player; /* a pointer-like handle (looks negative as i
 static GLuint g_tex;
 static volatile int g_audio_on;
 static SceUID g_audio_thread = -1;
-static int g_have_frame, g_frames, g_waits;
+static int g_have_frame, g_frames, g_waits, g_alloc_fail;
 
 static void *mem_alloc(void *p, uint32_t align, uint32_t size)
 {
@@ -41,8 +41,10 @@ static void *gpu_alloc(void *p, uint32_t align, uint32_t size)
     (void)align;
     size = (size + 0x3FFFF) & ~0x3FFFFu;
     SceUID uid = sceKernelAllocMemBlock("pixcars_video", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
-    if (uid < 0)
+    if (uid < 0) {
+        g_alloc_fail++;
         return NULL;
+    }
     void *addr = NULL;
     sceKernelGetMemBlockBase(uid, &addr);
     sceGxmMapMemory(addr, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
@@ -167,6 +169,7 @@ int movie_draw(void)
 }
 
 int movie_frames(void) { return g_frames; }
+int movie_alloc_failures(void) { return g_alloc_fail; }
 
 void movie_stop(void)
 {

@@ -13,5 +13,7 @@ int movie_draw(void);
 void movie_stop(void);
 /* Frames shown by the current / last video (for the log). */
 int movie_frames(void);
+/* Video-frame buffer allocations that failed so far (out of CDRAM). */
+int movie_alloc_failures(void);
 
 #endif
