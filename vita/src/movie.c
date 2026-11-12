@@ -16,7 +16,7 @@
 #include <psp2/sysmodule.h>
 #include <vitaGL.h>
 
-static SceAvPlayerHandle g_player = -1;
+static SceAvPlayerHandle g_player; /* a pointer-like handle (looks negative as int); 0 = none */
 static GLuint g_tex;
 static volatile int g_audio_on;
 static SceUID g_audio_thread = -1;
@@ -67,7 +67,7 @@ static int audio_thread(SceSize args, void *argp)
         return 0;
     while (g_audio_on) {
         SceAvPlayerFrameInfo f;
-        if (g_player >= 0 && sceAvPlayerIsActive(g_player) && sceAvPlayerGetAudioData(g_player, &f))
+        if (g_player && sceAvPlayerIsActive(g_player) && sceAvPlayerGetAudioData(g_player, &f))
             sceAudioOutOutput(port, f.pData);
         else
             sceAudioOutOutput(port, silence);
@@ -99,8 +99,8 @@ int movie_start(const char *path)
     init.numOutputVideoFrameBuffers = 2;
     init.autoStart = 1;
     g_player = sceAvPlayerInit(&init);
-    if (g_player < 0)
-        return g_player < -2 ? g_player : -2; /* SCE error code for the log */
+    if (!g_player)
+        return -2;
     sceAvPlayerAddSource(g_player, path);
     if (!g_tex) {
         /* a texture whose GXM descriptor is re-pointed at each decoded frame */
@@ -121,7 +121,7 @@ int movie_start(const char *path)
 
 int movie_draw(void)
 {
-    if (g_player < 0)
+    if (!g_player)
         return 0;
     if (!sceAvPlayerIsActive(g_player)) {
         movie_stop();
@@ -168,9 +168,9 @@ void movie_stop(void)
         sceKernelDeleteThread(g_audio_thread);
         g_audio_thread = -1;
     }
-    if (g_player >= 0) {
+    if (g_player) {
         sceAvPlayerStop(g_player);
         sceAvPlayerClose(g_player);
-        g_player = -1;
+        g_player = 0;
     }
 }
