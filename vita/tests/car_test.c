@@ -68,6 +68,11 @@ int main(int argc, char **argv)
     printf("reverse 3s: speed=%.2f\n", car_speed(&c));
     assert(car_speed(&c) < -10);
 
+    /* reset in place (pos aliases the car): stays where it is */
+    float px = c.pos[0], pz = c.pos[2];
+    car_spawn(&c, &w, c.pos, 0);
+    assert(c.pos[0] == px && c.pos[2] == pz && fabsf(c.pos[1] - 2.5f) < 1e-3f);
+
     /* straight into the wall at z = 600 */
     car_spawn(&c, &w, (float[3]){ 0, 0, 400 }, 0);
     run(&c, &w, idle, 1);

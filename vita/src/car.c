@@ -307,11 +307,13 @@ static void to_world(const Car *c, const float l[3], float o[3])
 
 void car_spawn(Car *c, const ColWorld *w, const float pos[3], float yaw)
 {
+    /* pos may alias c->pos (reset in place): read it before clearing the car; start the ray just
+       above so a reset under a bridge lands on the road, not on top */
+    float o[3] = { pos[0], pos[1] + 10.0f, pos[2] }, d[3] = { 0, -1, 0 }, t, n[3];
     memset(c, 0, sizeof *c);
-    float o[3] = { pos[0], pos[1] + 500.0f, pos[2] }, d[3] = { 0, -1, 0 }, t, n[3];
-    c->pos[0] = pos[0];
-    c->pos[2] = pos[2];
-    c->pos[1] = col_raycast(w, o, d, 4000.0f, &t, n) ? o[1] - t + 2.5f : pos[1];
+    c->pos[0] = o[0];
+    c->pos[2] = o[2];
+    c->pos[1] = col_raycast(w, o, d, 4000.0f, &t, n) ? o[1] - t + 2.5f : o[1] - 10.0f;
     float s = sinf(yaw), co = cosf(yaw);
     float rot[9] = { co, 0, -s, 0, 1, 0, s, 0, co };
     memcpy(c->rot, rot, sizeof rot);
