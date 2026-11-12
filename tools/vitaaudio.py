@@ -73,6 +73,38 @@ def main():
     open(os.path.join(eng, "engine.txt"), "w").write("\n".join(lines) + "\n")
     print(f"engine: {char}, {int(prof['numberofengineloops'])} loops")
 
+    # driving effects from sfx\fx.aud [<char>Burnout|Powerslide|Brake|Suspension]; impacts from
+    # sfx\impact. sfx.txt: name file [slip_min slip_max freq_min freq_max vol_min vol_max fade]
+    # (suspension lines carry the velocity tier start in slip_min)
+    sfxd = os.path.join(out, "sfx")
+    os.makedirs(sfxd, exist_ok=True)
+    fx = ini_sections(idx.read(BS.join(["data", "audio", "sfx", "fx.aud"])).decode("latin-1"))
+    rows = []
+
+    def take(name, ref, params=""):
+        src = BS.join(["data", "audio", ref.lower().replace("/", BS) + ".wav"])
+        if src not in idx.files:
+            print("missing", src)
+            return
+        fn = src.rsplit(BS, 1)[-1]
+        open(os.path.join(sfxd, fn), "wb").write(idx.read(src))
+        rows.append(f"{name} {fn} {params}".rstrip())
+
+    for role in ("burnout", "powerslide"):
+        s = fx[f"{char.lower()}{role}"]
+        take(role, s["filename"], " ".join(s[k] for k in ("slipmin", "slipmax", "frequencymodifiermin",
+                                                          "frequencymodifiermax", "volumemin", "volumemax",
+                                                          "fadeduration")))
+    take("brake", fx[f"{char.lower()}brake"]["filename"])
+    sus = fx[f"{char.lower()}suspension"]
+    for i in range(1, int(sus["numsounds"]) + 1):
+        take("suspension", sus[f"sound{i}"], f"{sus[f'sound{i}velocitytierstart']} {sus['maxlevelvelocity']} "
+             f"0 0 {sus['minlevelattenuation']} {sus['maxlevelattenuation']} {sus['minlevelvelocity']}")
+    for i in (1, 2, 3):
+        take("impact", f"SFX\\Impact\\imp_veh_hard_0{i}")
+    open(os.path.join(sfxd, "sfx.txt"), "w").write("\n".join(rows) + "\n")
+    print(f"sfx: {len(rows)} sounds")
+
 
 if __name__ == "__main__":
     main()

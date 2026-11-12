@@ -26,6 +26,21 @@ int main(int argc, char **argv)
     assert(parts == 2 && a.n_loops == 6 && a.n_gears == 5);
     assert(audio_speed_to_rpm(&a, 0) == 1 && audio_speed_to_rpm(&a, 50) == 2000);
     assert(audio_speed_to_rpm(&a, 170) == 5500);
+    /* effects: fx.aud roles, a one-shot voice plays and frees itself */
+    printf("sfx=%d\n", a.n_sfx);
+    assert(a.n_sfx == 10 && audio_sfx(&a, "suspension", 3) >= 0 && audio_sfx(&a, "impact", 3) < 0);
+    {
+        Audio q = a;
+        q.music = NULL; q.n_loops = 0;
+        int v = audio_play(&q, audio_sfx(&q, "brake", 0), 1, 1, 0);
+        static int16_t buf[2 * 4096];
+        audio_mix(&q, buf, 4096);
+        long e = 0;
+        for (int i = 0; i < 2 * 4096; i++) e += buf[i] < 0 ? -buf[i] : buf[i];
+        assert(v >= 0 && e > 0);
+        for (int k = 0; k < 40; k++) audio_mix(&q, buf, 4096); /* 1.26 s sample ends */
+        assert(!q.voice[v].active);
+    }
 
     const int secs = 10, n = AUDIO_RATE * secs, chunk = 1024;
     int16_t *pcm = malloc(4u * n);

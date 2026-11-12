@@ -640,6 +640,74 @@ static void pose_car(const Car *c, const VcaAnim *const *anims, const float *wei
     }
 }
 
+/* Driving sounds from the fx.aud parameters (exported to sfx/sfx.txt). */
+typedef struct { int burn, slide; float burn_lv, slide_lv, sus_cool, imp_cool; int brake_armed; } DriveSfx;
+
+static float sfx_loop(int voice, int id, int on, float slip, float *level, float dt)
+{
+    const Sfx *x = &g_audio.sfx[id];
+    float t = (slip - x->slip_min) / (x->slip_max - x->slip_min);
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    float target = on ? (x->vol_min + (x->vol_max - x->vol_min) * t) / 100.0f : 0.0f;
+    float step = dt / (x->fade > 0 ? x->fade : 0.1f); /* FadeDuration */
+    *level += fmaxf(-step, fminf(step, target - *level));
+    if (voice >= 0) {
+        g_audio.voice[voice].vol = *level;
+        g_audio.voice[voice].pitch = 1.0f + x->freq_min + (x->freq_max - x->freq_min) * t;
+    }
+    return *level;
+}
+
+static void drive_sounds(DriveSfx *d, const Car *c, const CarInput *in, float dt)
+{
+    int burn = audio_sfx(&g_audio, "burnout", 0), slide = audio_sfx(&g_audio, "powerslide", 0);
+    if (burn >= 0 && d->burn < 0)
+        d->burn = audio_play(&g_audio, burn, 0, 1, 1);
+    if (slide >= 0 && d->slide < 0)
+        d->slide = audio_play(&g_audio, slide, 0, 1, 1);
+    if (burn >= 0)
+        sfx_loop(d->burn, burn, in->throttle > 0 && c->grounded && c->drive_slip > 0.05f, c->drive_slip, &d->burn_lv, dt);
+    if (slide >= 0)
+        sfx_loop(d->slide, slide, c->ps == 1 && c->grounded, c->side_slip, &d->slide_lv, dt);
+    float speed = fabsf(car_speed(c));
+    if (in->brake > 0 && speed > 30.0f && c->gear > 0 && d->brake_armed) {
+        audio_play(&g_audio, audio_sfx(&g_audio, "brake", 0), 1, 1, 0);
+        d->brake_armed = 0;
+    }
+    if (in->brake <= 0)
+        d->brake_armed = 1;
+    /* suspension: the highest velocity tier reached, attenuation by Min/MaxLevelVelocity */
+    d->sus_cool -= dt;
+    int sus = -1;
+    for (int k = 0; audio_sfx(&g_audio, "suspension", k) >= 0; k++) {
+        int id = audio_sfx(&g_audio, "suspension", k);
+        if (c->strut_hit >= g_audio.sfx[id].slip_min)
+            sus = id;
+    }
+    if (sus >= 0 && d->sus_cool <= 0) {
+        const Sfx *x = &g_audio.sfx[sus];
+        float t = (c->strut_hit - x->fade) / (x->slip_max - x->fade);
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        audio_play(&g_audio, sus, (x->vol_min + (x->vol_max - x->vol_min) * t) / 100.0f, 1, 0);
+        d->sus_cool = 0.25f;
+    }
+    /* wall impacts */
+    d->imp_cool -= dt;
+    if (c->impact > 5.0f && d->imp_cool <= 0) {
+        audio_play(&g_audio, audio_sfx(&g_audio, "impact", rand() % 3), fminf(1.0f, c->impact / 40.0f), 1, 0);
+        d->imp_cool = 0.3f;
+    }
+}
+
+static void stop_drive_sounds(DriveSfx *d)
+{
+    if (d->burn >= 0)
+        g_audio.voice[d->burn].vol = 0;
+    if (d->slide >= 0)
+        g_audio.voice[d->slide].vol = 0;
+    d->burn_lv = d->slide_lv = 0;
+}
+
 /* ------------------------------------------------------------------ main */
 int main(void)
 {
@@ -706,6 +774,7 @@ int main(void)
     float chase[3] = { 0, 0, 0 };
     int chase_init = 0, idle_anim = -1;
     Lean lean = { 0.5f, 0.5f, 0.5f, 0.5f, 0.0f };
+    DriveSfx dsfx = { -1, -1, 0, 0, 0, 0, 1 };
     float parked_t = 0, idle_t = 0;
     uint32_t prev_buttons = 0;
     SceUInt64 last = sceKernelGetProcessTimeWide();
@@ -759,6 +828,7 @@ int main(void)
             g_audio.engine_vol = 0.8f;
             if (pressed & SCE_CTRL_RIGHT)
                 g_audio_next = 1;
+            drive_sounds(&dsfx, &g_car, &in, dt);
 
             /* parked with no input: play one of the game's idle animations, then wait again */
             int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || fabsf(car_speed(&g_car)) > 0.5f;
@@ -808,8 +878,10 @@ int main(void)
             pose_car(&g_car, pa, pw, pt, pn);
         }
 
-        if (mode != 1 || !driving)
+        if (mode != 1 || !driving) {
             g_audio.engine_vol = 0;
+            stop_drive_sounds(&dsfx);
+        }
         if (mode == 1) {
             int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
             int rx = (int)pad.rx - 128, ry = (int)pad.ry - 128;

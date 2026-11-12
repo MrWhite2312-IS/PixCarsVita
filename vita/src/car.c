@@ -672,7 +672,10 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
                 madd(c->vel, n, -vn);
             comp = tp->max_comp;
         }
-        float vs = fmaxf(-tp->max_comp_rate, fminf(tp->max_comp_rate, dot3(vc, n)));
+        float vraw = dot3(vc, n);
+        if (-vraw > c->strut_hit)
+            c->strut_hit = -vraw; /* closing speed, for the suspension sounds */
+        float vs = fmaxf(-tp->max_comp_rate, fminf(tp->max_comp_rate, vraw));
         float k = spring_k(p, i);
         float damp = 2.0f * (vs > 0 ? tp->bounce_damp : tp->rebound_damp) * sqrtf(k * m);
         float fn = fmaxf(0.0f, k * comp - damp * vs);
@@ -705,7 +708,11 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
             c->slip[i] += h * 3.0f * (vz - avz * c->slip[i] - c->omega[i] * R);
         }
         alpha = fmaxf(-1.5707963f, fminf(1.5707963f, alpha));
+        if (rear)
+            c->side_slip = fmaxf(c->side_slip, fabsf(alpha));
         c->slip[i] = fmaxf(-0.98f, fminf(0.98f, c->slip[i]));
+        if (driven)
+            c->drive_slip = fmaxf(c->drive_slip, -c->slip[i]);
 
         /* forces (PS2 0x232a00): independent curves, no friction circle; the lateral load
            blends a quarter of the weight with the strut force by NormalLoadScale */
@@ -757,6 +764,7 @@ static void substep(Car *c, const ColWorld *w, float hub_torque, int handbrake, 
         madd(c->pos, n, depth);
         float vn = dot3(c->vel, n);
         if (vn < 0) {
+            c->impact = fmaxf(c->impact, -vn);
             madd(c->vel, n, -vn * (1.0f + p->restitution));
             float vt[3] = { c->vel[0], c->vel[1], c->vel[2] };
             madd(vt, n, -dot3(vt, n));
@@ -833,6 +841,7 @@ void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
     if (!in->handbrake)
         c->hb_yaw = 0;
     float hub = drivetrain(c, dt);
+    c->drive_slip = c->side_slip = c->strut_hit = c->impact = 0;
     int n = (int)ceilf(dt * 240.0f);
     if (n < 1) n = 1;
     if (n > 24) n = 24;

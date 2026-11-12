@@ -85,6 +85,9 @@ typedef struct {
     float ps_entry_speed, ps_timer, hb_yaw;
     float rear_steer, lat_scale[4], yaw_limit, boost;
     int grounded;
+    /* per car_step, for sounds: max driven-wheel spin slip, max rear slip angle (rad),
+       max strut closing speed and wall impact speed (ft/s) */
+    float drive_slip, side_slip, strut_hit, impact;
 } Car;
 
 void car_spawn(Car *c, const CarParams *p, const ColWorld *w, const float pos[3], float yaw);

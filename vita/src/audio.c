@@ -85,6 +85,36 @@ void audio_next_track(Audio *a)
     open_track(a);
 }
 
+/* Decode a whole mono IMA .wav (low nibble first) into 16-bit samples. */
+static int load_ima_mono(const char *path, int16_t **pcm, uint32_t *n, uint32_t *rate)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    *rate = 0;
+    uint32_t bytes = wav_data(f, rate);
+    uint8_t *buf = bytes ? malloc(bytes) : NULL;
+    if (!buf || fread(buf, 1, bytes, f) != bytes) {
+        free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    *pcm = malloc(4u * bytes);
+    if (!*pcm) {
+        free(buf);
+        return 0;
+    }
+    ImaState s = { 0, 0 };
+    for (uint32_t i = 0; i < bytes; i++) {
+        (*pcm)[2 * i] = ima_step(&s, buf[i] & 15);
+        (*pcm)[2 * i + 1] = ima_step(&s, buf[i] >> 4);
+    }
+    free(buf);
+    *n = 2 * bytes;
+    return 1;
+}
+
 static int load_loop(Audio *a, const char *line)
 {
     if (a->n_loops >= AUDIO_MAX_LOOPS)
@@ -109,29 +139,9 @@ static int load_loop(Audio *a, const char *line)
     }
     char path[384];
     snprintf(path, sizeof path, "%sengine/%s", a->dir, name);
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    uint32_t rate;
+    if (!load_ima_mono(path, &l->pcm, &l->n, &rate))
         return 0;
-    uint32_t rate = 0, bytes = wav_data(f, &rate);
-    uint8_t *buf = bytes ? malloc(bytes) : NULL;
-    if (!buf || fread(buf, 1, bytes, f) != bytes) {
-        free(buf);
-        fclose(f);
-        return 0;
-    }
-    fclose(f);
-    l->pcm = malloc(4u * bytes);
-    if (!l->pcm) {
-        free(buf);
-        return 0;
-    }
-    ImaState s = { 0, 0 };
-    for (uint32_t i = 0; i < bytes; i++) { /* mono: low nibble first */
-        l->pcm[2 * i] = ima_step(&s, buf[i] & 15);
-        l->pcm[2 * i + 1] = ima_step(&s, buf[i] >> 4);
-    }
-    free(buf);
-    l->n = 2 * bytes;
     a->n_loops++;
     return 1;
 }
@@ -142,6 +152,7 @@ int audio_init(Audio *a, const char *root)
     snprintf(a->dir, sizeof a->dir, "%s", root);
     a->music_vol = 0.55f;
     a->engine_vol = 0.8f;
+    a->sfx_vol = 0.9f;
     int parts = 0;
     char path[384], line[1024];
     snprintf(path, sizeof path, "%smusic/playlist.txt", root);
@@ -172,7 +183,53 @@ int audio_init(Audio *a, const char *root)
         fclose(f);
         parts += a->n_loops > 0;
     }
+    snprintf(path, sizeof path, "%ssfx/sfx.txt", root);
+    f = fopen(path, "r");
+    if (f) {
+        while (a->n_sfx < AUDIO_MAX_SFX && fgets(line, sizeof line, f)) {
+            Sfx *x = &a->sfx[a->n_sfx];
+            char file[64];
+            memset(x, 0, sizeof *x);
+            x->vol_min = x->vol_max = 100;
+            x->fade = 0.1f;
+            int k = sscanf(line, "%31s %63s %f %f %f %f %f %f %f", x->name, file, &x->slip_min, &x->slip_max,
+                           &x->freq_min, &x->freq_max, &x->vol_min, &x->vol_max, &x->fade);
+            if (k < 2)
+                continue;
+            snprintf(path, sizeof path, "%ssfx/%s", root, file);
+            if (load_ima_mono(path, &x->pcm, &x->n, &x->rate))
+                a->n_sfx++;
+        }
+        fclose(f);
+    }
     return parts;
+}
+
+int audio_sfx(const Audio *a, const char *name, int nth)
+{
+    for (int i = 0; i < a->n_sfx; i++)
+        if (!strcmp(a->sfx[i].name, name) && nth-- == 0)
+            return i;
+    return -1;
+}
+
+int audio_play(Audio *a, int sfx, float vol, float pitch, int loop)
+{
+    if (sfx < 0)
+        return -1;
+    for (int v = 0; v < AUDIO_MAX_VOICES; v++) {
+        Voice *o = &a->voice[v];
+        if (o->active)
+            continue;
+        o->sfx = sfx;
+        o->pos = 0;
+        o->vol = vol;
+        o->pitch = pitch;
+        o->loop = loop;
+        o->active = 1; /* last: the mixer thread starts reading it now */
+        return v;
+    }
+    return -1;
 }
 
 void audio_free(Audio *a)
@@ -181,6 +238,8 @@ void audio_free(Audio *a)
         fclose(a->music);
     for (int i = 0; i < a->n_loops; i++)
         free(a->loop[i].pcm);
+    for (int i = 0; i < a->n_sfx; i++)
+        free(a->sfx[i].pcm);
     memset(a, 0, sizeof *a);
 }
 
@@ -266,6 +325,23 @@ void audio_mix(Audio *a, int16_t *out, int frames)
                 lp->pos += steps[k];
                 if (lp->pos >= lp->n)
                     lp->pos -= lp->n;
+            }
+            for (int v = 0; v < AUDIO_MAX_VOICES; v++) {
+                Voice *o = &a->voice[v];
+                if (!o->active)
+                    continue;
+                const Sfx *x = &a->sfx[o->sfx];
+                uint32_t p0 = (uint32_t)o->pos;
+                if (p0 >= x->n) {
+                    if (!o->loop) {
+                        o->active = 0;
+                        continue;
+                    }
+                    o->pos -= x->n;
+                    p0 = (uint32_t)o->pos;
+                }
+                e += x->pcm[p0] * o->vol * a->sfx_vol;
+                o->pos += o->pitch * x->rate / (float)AUDIO_RATE;
             }
             l += e;
             r += e;
