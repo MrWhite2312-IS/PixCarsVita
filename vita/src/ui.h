@@ -78,6 +78,7 @@ typedef struct {
     int n_sign;
     UiCamera cam[4];
     int n_cam;
+    float boost_len[3];        /* BoostMeterOverlay.lyr BoostLevelLengths, by NOX level */
 } Ui;
 
 /* Load <dir>ui.vcs + <dir>ui.txt; upload(tex) turns a scene texture into a GL name. */
@@ -99,6 +100,8 @@ void ui_draw_background(const Ui *ui, float p, float header_t);
    slides them one step towards the next/previous item, t 0..1 over sign_anim seconds.
    time drives the label's pulse. */
 void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time);
+/* The in-game boost meter: bar length from BoostLevelLengths (by NOX level), fill 0..1. */
+void ui_draw_boost_meter(const Ui *ui, float length, float fill);
 void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scale, const uint8_t rgba[4], int hj, int vj);
 
 #endif

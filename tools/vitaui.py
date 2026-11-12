@@ -44,7 +44,8 @@ LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MenuDescription", "MainMenuS
 SIGN_DESC = {"Story Mode": "STR_STORY_MODE_DESC", "Arcade Mode": "STR_ARCADE_MODE_DESC",
              "Versus": "STR_VS_MODE_DESC", "Options": "STR_OPTIONS_DESC",
              "Bonus Content": "STR_BONUS_CONTENT_DESC"}
-EXTRA_TEX = ["highlight_arrow"]  # drawn by the sign menu's HighlightArrows effect
+EXTRA_TEX = ["highlight_arrow",  # drawn by the sign menu's HighlightArrows effect
+             "boostmeter_cap", "boostmeter_gradient", "white"]  # in-game BoostMeterOverlay
 # The Spanish .bin files hold a few strings the shipped .loc name lists lack, so names and
 # strings drift apart. (first name index, string offset) pairs checked by hand against the
 # text; names past the last checked range are not exported.
@@ -240,6 +241,9 @@ def main():
                 print(f"{layer}: skipped {comp} ({typ})")
     for e in EXTRA_TEX:
         tex(e)
+    # the in-game boost meter's bar length per boost level (CarsUIBoostMeterContainer)
+    bm = ini(idx.read(ui + "boostmeteroverlay.lyr").decode("latin-1"))
+    lines.append("boostlen " + " ".join(x.strip() for x in bm["General"]["boostlevellengths"].split(",")))
     # dynamic texts the code fills in, plus the texts the layers name
     used |= {"STR_START", "STR_MAIN_MENU", "STR_SELECT"}
     for k in sorted(used):

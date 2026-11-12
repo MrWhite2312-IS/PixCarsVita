@@ -107,6 +107,18 @@ def main():
     take("wheelstand_up", ws["filenameup"])
     take("wheelstand_down", ws["filenamedown"])
     take("boost", secs[f"{char.lower()}boostsound"]["filename"])
+    # the character's dialogue (dialogue\<code>.aud, Spanish lines dialogue\spa\<code>\spa_<sound>):
+    # sfx.txt rows "voice_<group> <file>" in the group's order, voice.txt "<group> <motion|-> <frame>"
+    vcode = opts.get("voice", "lm").lower()
+    dlg = ini_sections(idx.read(BS.join(["data", "audio", "dialogue", vcode + ".aud"])).decode("latin-1"))
+    vlines = []
+    for group in ("Cool", "Hit", "Idle"):
+        g = dlg.get(group.lower(), {})
+        for i in range(1, int(g.get("numsounds", 0)) + 1):
+            e = dlg[f"{group.lower()}-{i}"]
+            take(f"voice_{group.lower()}", BS.join(["Dialogue", "spa", vcode, "spa_" + e["sound"].lower()]))
+            vlines.append(f"{group.lower()} {e.get('motion', '-').lower()} {e.get('soundstartframe', '0')}")
+    open(os.path.join(sfxd, "voice.txt"), "w").write("\n".join(vlines) + "\n")
     # front end: the UIResponseEmitter bank (sfx/ui_fe.aud) and the drive-in's crickets loop
     # (scenes/fe/fe.aud [SoultreeSound1]); named after their files, e.g. fe_select_continue
     ui = ini_sections(idx.read(BS.join(["data", "audio", "sfx", "ui_fe.aud"])).decode("latin-1"))["uiresponseemitter"]

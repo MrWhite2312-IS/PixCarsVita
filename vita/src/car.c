@@ -313,6 +313,8 @@ static const CarParams MCQ_DEFAULTS = {
     .ps_min_boost = 0, .ps_max_boost = 100,
     .ps_exit_time = 0.45f, .ps_front_exit = 1.2f, .ps_rear_exit = 1.4f, .ps_exit_yaw = 0.9f,
     .ps_steer_scale = 1.0f, .ps_rear_steer_scale = -0.2f,
+    .land_rear = 0.1f, .trans_rear = 0.66f, .land_front = 0.55f, .trans_front = 0.2f,
+    .land_exit_angle = 0.55f, .land_exit_yaw = 1,
     .preload_time = 0.08f, .max_preload = 42000, .preload_charge = 10, .max_preload_time = 0,
     .ws_angle = 50, .ws_roll_gain = -6, .ws_roll_rate_gain = 20000, .ws_steer_scale = 2, .ws_torque_scale = 2,
     .steer_power = 2, .x_rate = 25, .gas_rate = 4, .brake_rate = 20, .reverse_steer = 0.4f,
@@ -404,6 +406,13 @@ void car_params_parse(CarParams *p, const char *t)
         ini_f(t, PS, "PowerslideMaxBoost", &p->ps_max_boost, 1);
         ini_f(t, PS, "PowerslideSteeringScale", &p->ps_steer_scale, 1);
         ini_f(t, PS, "PowerslideRearSteeringScale", &p->ps_rear_steer_scale, 1);
+        const char *LC = "LandingControl";
+        ini_f(t, LC, "LandingRearFricitonScale", &p->land_rear, 1); /* sic, as the game spells it */
+        ini_f(t, LC, "TransitionRearFrictionScale", &p->trans_rear, 1);
+        ini_f(t, LC, "LandingFrontFrictionScale", &p->land_front, 1);
+        ini_f(t, LC, "TransitionFrontFrictionScale", &p->trans_front, 1);
+        ini_f(t, LC, "LandingExitAngle", &p->land_exit_angle, 1);
+        ini_f(t, LC, "LandingExitYaw", &p->land_exit_yaw, 1);
         static const char *TN[4] = { "FrontLeftTire", "FrontRightTire", "RearLeftTire", "RearRightTire" };
         for (int i = 0; i < 4; i++) {
             TireParams *tp = &p->tire[i];
@@ -609,6 +618,7 @@ void car_spawn(Car *c, const CarParams *p, const ColWorld *w, const float pos[3]
     c->rev_t = p->reverse_time;
     c->jump_since = 1.0f;
     c->ps_armed = 1;
+    c->turn_dir = 1.0f;
     c->nox = p->nox_base * p->nox_level; /* engine 0x2253a0: starts full */
 }
 
@@ -636,7 +646,7 @@ static float lerp2(float x, float x0, float y0, float x1, float y1)
 
 static int driven_wheel(const Car *c, int i)
 {
-    if (c->front_drive) /* powerslide: the engine drives the front pair (0x225070 in 0x382320) */
+    if (c->front_drive || c->backwards) /* powerslide / backwards: the front pair (0x225070) */
         return i < 2;
     const CarParams *p = c->p;
     return p->drivetrain == 2 || (p->drivetrain == 1 ? i >= 2 : i < 2);
@@ -649,6 +659,8 @@ static float drivetrain(Car *c, float dt)
     const CarParams *p = c->p;
     int reverse = c->gear < 0;
     float dir = reverse ? -1.0f : 1.0f;
+    if (c->backwards)
+        dir = -dir; /* engine +132 = -1: driving backwards */
     float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
     float load = c->gas; /* in reverse the controls feed the brake into the throttle */
     if (c->rpm < p->min_rpm)
@@ -1023,6 +1035,10 @@ static void controls(Car *c, float dt)
     if (c->tilt)
         scale *= p->ws_steer_scale;
     c->steer_cmd = scale * c->xf;
+    if (c->backwards) { /* the rear wheels lead: they steer, the other way, 1.2 times */
+        c->rear_cmd = -1.2f * c->steer_cmd;
+        c->steer_cmd = 0;
+    }
 
     /* stopped hold: the EBrake, or the Brake before reverse is armed, at <= 3 ft/s */
     int braking = c->ebrake_in != 0 || (c->brake_in != 0 && !c->rev_ready);
@@ -1041,14 +1057,14 @@ static void controls(Car *c, float dt)
     c->brake = 0.5f * c->brake_acc;
     c->burn_arm = c->brake_in != 0 && c->gas_in != 0;
     /* reverse: once armed, the brake held for ReverseTime selects reverse and becomes the gas */
-    if ((c->brake_in != 0 || c->gas_in == 0) && c->rev_ready) {
+    if ((c->brake_in != 0 || c->gas_in == 0) && c->rev_ready && !c->backwards) {
         if (c->rev_t <= 0) {
             c->gear = -1;
             c->gas_in = c->brake_in;
         } else {
             c->rev_t -= dt;
         }
-    } else {
+    } else if (!c->backwards) {
         c->rev_t = p->reverse_time;
         if (c->gear < 0)
             c->gear = 1;
@@ -1146,6 +1162,10 @@ static void set_lat(Car *c, float front, float rear)
 static void powerslide(Car *c, float dt)
 {
     const CarParams *p = c->p;
+    if (c->backwards) {
+        c->boost = 1.0f;
+        return;
+    }
     if (c->ps_low && !c->tilt) {
         if (c->fwd >= 0) {
             c->lat_scale[0] = c->lat_scale[1] = p->ps_ls_front;
@@ -1248,6 +1268,92 @@ static void tilt(Car *c, int button, float dt)
     c->tilt_t -= dt;
 }
 
+/* 0x386060: landing control. Set when all four wheels leave the ground (and kept only while the
+   car flies roughly nose first); touching down, Landing*FrictionScale until all four are down,
+   then Transition*FrictionScale until the car runs along its nose (|cos| > LandingExitAngle)
+   with a yaw rate under LandingExitYaw. */
+static void landing(Car *c)
+{
+    const CarParams *p = c->p;
+    float cosv = c->spd > 1e-3f ? c->fwd / c->spd : 1.0f;
+    if (c->grounded == 0)
+        c->landing = 1;
+    if (cosv < 0.707f)
+        c->landing = 0;
+    if (c->spd == 0)
+        c->landing = 0;
+    if (!c->landing)
+        return;
+    int all = c->grounded == 4;
+    if (c->fwd > 0)
+        set_lat(c, all ? p->trans_front : p->land_front, all ? p->trans_rear : p->land_rear);
+    else
+        set_lat(c, all ? p->trans_rear : p->land_rear, all ? p->trans_front : p->land_front);
+    if (all && fabsf(cosv) > p->land_exit_angle && fabsf(dot3(c->angvel, c->rot + 3)) < p->land_exit_yaw)
+        c->landing = 0;
+}
+
+/* 0x386790: the Backwards ability. Over 73.33 ft/s with the stick centred: EBrake, let go,
+   EBrake again within 0.5 s (each step) and the car spins round keeping its velocity; moving
+   tail first it then drives backwards (front-wheel drive, engine reversed, rear steering).
+   Under 73.33 ft/s without brakes it spins back by itself. */
+static void backwards_turn(Car *c, float dt)
+{
+    c->turn_dir = c->turn_dir < 0 ? 1.0f : -1.0f; /* +1180 flips every frame */
+    c->turned = 0;
+    if (c->backwards && c->spd < 73.333f && c->ebrake_in == 0 && c->brake_in == 0) {
+        c->backwards = 0;
+        c->turn_auto = 1;
+    }
+    int centred = c->x == 0;
+    if (c->turn_state == 0 && c->ebrake_in != 0 && centred && c->spd > 73.333f) {
+        c->turn_state = 1;
+        c->turn_t = 0;
+    } else if (c->turn_state == 1 && c->turn_t < 0.5f) {
+        if (c->ebrake_in == 0 && centred) {
+            c->turn_state = 2;
+            c->turn_t = 0;
+        }
+    } else if ((c->turn_state == 2 && c->turn_t < 0.5f) || c->turn_auto) {
+        if ((c->ebrake_in != 0 && centred && c->grounded > 0) || c->turn_auto) {
+            c->turn_state = 3;
+            c->turn_yaw = 0;
+            memcpy(c->turn_vel, c->vel, sizeof c->turn_vel);
+            c->turn_rpm = c->rpm;
+            c->turn_sign = c->turn_dir; /* +1140 */
+            c->turn_auto = 0;
+            c->turned = 1; /* +1010 b7: the character's cool line */
+        }
+    } else if (c->turn_state == 3) {
+        if (fabsf(c->turn_yaw) >= 1.5707963f) {
+            c->turn_state = 0;
+            madd(c->angvel, c->rot + 3, -dot3(c->angvel, c->rot + 3));
+            if (c->grounded == 4)
+                set_lat(c, 1, 1);
+            c->backwards = car_speed(c) < 0;
+            c->yaw_limit = c->p->yaw_rate_limit;
+            c->rpm = c->turn_rpm;
+            for (int i = 0; i < 4; i++)
+                c->omega[i] = -c->omega[i];
+        } else {
+            /* the spin: velocity held, no grip, gas on. shortcut: the game sets a 6 rad/s spin
+               through the rigid body (vtable +148) and stops after pi/2 of its own count; we
+               spin at 12 rad/s so the same 0.26 s turns the car round */
+            memcpy(c->vel, c->turn_vel, sizeof c->vel);
+            madd(c->angvel, c->rot + 3, 12.0f * c->turn_sign - dot3(c->angvel, c->rot + 3));
+            c->gas = 1.0f;
+            c->brake_in = 0;
+            set_lat(c, 0, 0);
+            c->yaw_limit = 1e9f; /* the spin is set, not driven: past YawRateLimit */
+            c->turn_yaw += 6.0f * dt;
+        }
+    } else {
+        c->turn_state = 0;
+        c->turn_t = 0;
+    }
+    c->turn_t += dt;
+}
+
 void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
 {
     const CarParams *p = c->p;
@@ -1267,6 +1373,8 @@ void car_step(Car *c, const ColWorld *w, const CarInput *in, float dt)
     powerslide(c, dt);
     handbrake(c, dt);
     tilt(c, in->tilt, dt);
+    landing(c);
+    backwards_turn(c, dt);
     /* 0x383030: burnout timers (charge, then thrust while the gas is held) */
     if (c->burn_t > 0 && !c->burn_charge)
         c->burn_t -= dt;

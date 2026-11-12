@@ -129,6 +129,8 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
                     ui->sign_sel_rgba[k] = (uint8_t)c[4 + k];
                 }
             }
+        } else if (!strncmp(line, "boostlen ", 9)) {
+            sscanf(line + 9, "%f %f %f", &ui->boost_len[0], &ui->boost_len[1], &ui->boost_len[2]);
         } else if (!strncmp(line, "bg ", 3)) {
             sscanf(line + 3, "%f %f %f %f %f %f %f %f", &ui->bg[0], &ui->bg[1], &ui->bg[2], &ui->bg[3], &ui->bg[4],
                    &ui->bg[5], &ui->bg[6], &ui->bg[7]);
@@ -386,4 +388,29 @@ void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time)
         quad(ui->gl_tex[at], cx - half - a, cy, a, a, 0, 0, 1, 1, yellow);     /* angle 0 points left */
         quad(ui->gl_tex[at], cx + half, cy, a, a, 1, 0, 0, 1, yellow);         /* mirrored: right */
     }
+}
+
+void ui_draw_boost_meter(const Ui *ui, float length, float fill)
+{
+    /* BoostMeterOverlay.lyr/.lyt, laid out by CarsUIBoostMeterContainer::SetLevel (PS2
+       0x23dde0): container at 580,371; caps 16 high, bar 10 high and length - 12 long, the
+       mask hiding the empty right part of the gradient (SetFill, 0x23ddd0) */
+    int cap = ui_tex(ui, "boostmeter_cap"), grad = ui_tex(ui, "boostmeter_gradient"),
+        white = ui_tex(ui, "white");
+    if (cap < 0 || grad < 0 || white < 0 || length <= 0)
+        return;
+    const float cx = 580, cy = 371, L = length;
+    const uint8_t black[4] = { 0, 0, 0, 255 }, tint[4] = { 40, 40, 40, 128 }, full[4] = { 255, 255, 255, 255 };
+    fill = clamp01(fill);
+#define R(x0, w, h) ((cx + (x0) - (w)) * SX), ((cy - (h) * 0.5f) * SY), ((w) * SX), ((h) * SY)
+    quad(ui->gl_tex[cap], R(-(L - 16), 16, 16), 0, 0, 1, 1, black);                /* Cap Left */
+    quad(ui->gl_tex[cap], R(-16, L - 32, 16), 0.9f, 0, 0.9f, 1, black);            /* Cap Middle */
+    /* Cap Right: left-justified at 0 and turned 180 degrees about that anchor: it ends at 0 */
+    quad(ui->gl_tex[cap], R(0, 16, 16), 1, 1, 0, 0, black);
+    quad(ui->gl_tex[white], R(-6, L - 12, 10), 0, 0, 1, 1, tint);                  /* Background Tint */
+    float bw = (L - 12) * fill;
+    if (bw > 0)
+        quad(ui->gl_tex[grad], ((cx - 6 - (L - 12)) * SX), ((cy - 5) * SY), (bw * SX), (10 * SY),
+             0, 0, fill, 1, full);                                                   /* Boost Gradient */
+#undef R
 }

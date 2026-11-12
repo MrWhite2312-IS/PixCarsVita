@@ -99,6 +99,7 @@ L2/R2: R1→R, L1→L y R2 (Turbo) pasa al panel táctil trasero.
 | Panel trasero (mantener) | Turbo (NOX: 1,65 s, se recarga solo) |
 | Stick (o cruceta) atrás y luego adelante | Saltar (a más de 20 mph, sin freno) |
 | ✕ + □ parado, soltar □ | Burnout (salida con empuje) |
+| ○, soltar, ○ (stick recto, > 50 mph) | Giro de 180° y conducir hacia atrás; bajo 50 mph vuelve a girar |
 | ✕ + stick a fondo despacio | Donut (derrape a baja velocidad, sin botón) |
 | SELECT | Recolocar el coche |
 | △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario, → siguiente canción) |
@@ -119,7 +120,7 @@ powerslide 0x382320 (tracción delantera durante el derrape, donut a baja veloci
 freno de mano 0x382a00, inclinar 0x382b40 (`[Wheelstand]`), burnout 0x383030, control en el
 aire y empuje del powerslide 0x3817c0 (`[Aerodynamics]`) y el NOX del motor 0x225810.
 Sonidos: `Whl_Stnd`/`whl_down` al inclinar y `NOS_Boost` del turbo; caras: `MCQ_EF_Boost`,
-`MCQ_EF_DonutsL/R` y golpes `MCQ_EF_MinHit*/MaxHit*`. Para tenerlas, convierte con:
+`MCQ_EF_DonutsL/R` y golpes `MCQ_EF_MinHit*/MaxHit*`. También: control de aterrizaje 0x386060 (`[LandingControl]`), conducir hacia atrás 0x386790, frases de McQueen en español (`Audio\Dialogue\lm.aud`: Cool tras el 180, el donut o el turbo, Hit en golpes, Idle con las animaciones de espera; esperas y probabilidades de `dialogue.txt`) y el HUD: el medidor de turbo `BoostMeterOverlay` (0x23dde0). Vuelve a ejecutar también `vitaui.py`. Para tenerlas, convierte con:
 
 ```bash
 python tools/vitaconv.py char McQ extracted/vita/mcq bef_kch bef_won bef_breath bef_ow bef_lost beft_1_6a. beft_idle bef_lean e_eyes mcq_ef_boost mcq_ef_donuts mcq_ef_minhit mcq_ef_maxhit mcq_ef_cool

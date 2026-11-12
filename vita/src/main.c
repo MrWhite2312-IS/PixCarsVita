@@ -785,6 +785,104 @@ static void drive_overlay(Overlay *o, const Car *c, float dt)
     }
 }
 
+/* The character's dialogue (Audio\Dialogue\lm.aud, Spanish lines; exported to sfx.txt as
+   voice_<group> and sfx/voice.txt with each line's motion and sound start frame). Line
+   buffers and chances from dialogue.txt [DialogueManager]: Cool 5 s / 0.8, Hit 1 s / 1,
+   Idle 15 s. Cool lines follow the PS2 character states (0x2b2a80): after the 180, on a
+   donut and when the boost kicks in (0x376360 picks Cool, its motion with it). */
+enum { DLG_COOL, DLG_HIT, DLG_IDLE, DLG_GROUPS };
+static const char *DLG_NAME[DLG_GROUPS] = { "cool", "hit", "idle" };
+static const float DLG_BUFFER[DLG_GROUPS] = { 5, 1, 15 }, DLG_CHANCE[DLG_GROUPS] = { 0.8f, 1, 1 };
+typedef struct {
+    int n[DLG_GROUPS];
+    int motion[DLG_GROUPS][16];
+    float start[DLG_GROUPS][16];   /* sound start, seconds into the motion */
+    float cool[DLG_GROUPS];        /* line buffer left */
+    float busy;                    /* the line being spoken */
+    int pending; float delay;      /* a line waiting for its start frame */
+    int loaded;
+} Dialogue;
+static Dialogue g_dlg = { .pending = -1 };
+
+static int anim_by_name(const char *name)
+{
+    for (int i = 0; i < g_n_anims; i++)
+        if (strcasecmp(g_anims[i].name, name) == 0)
+            return i;
+    return -1;
+}
+
+static void dialogue_load(Dialogue *d)
+{
+    d->loaded = 1;
+    FILE *f = fopen(DATA_ROOT "audio/sfx/voice.txt", "r");
+    if (!f)
+        return;
+    char g[32], m[64];
+    int frame;
+    while (fscanf(f, "%31s %63s %d", g, m, &frame) == 3)
+        for (int k = 0; k < DLG_GROUPS; k++)
+            if (strcmp(g, DLG_NAME[k]) == 0 && d->n[k] < 16) {
+                int a = m[0] == '-' ? -1 : anim_by_name(m);
+                d->motion[k][d->n[k]] = a;
+                d->start[k][d->n[k]] = a >= 0 ? frame / fmaxf(g_anims[a].anim.fps, 1.0f) : 0;
+                d->n[k]++;
+            }
+    fclose(f);
+}
+
+/* Say a random line of the group (if its buffer and chance allow); returns the line's motion
+   (-1 none) and its index in *line. */
+static int dialogue_say(Dialogue *d, int group, int *line)
+{
+    if (!d->loaded)
+        dialogue_load(d);
+    char name[32];
+    snprintf(name, sizeof name, "voice_%s", DLG_NAME[group]);
+    if (!d->n[group] || d->cool[group] > 0 || d->busy > 0 || audio_sfx(&g_audio, name, 0) < 0)
+        return -2;
+    if ((float)rand() / (float)RAND_MAX > DLG_CHANCE[group])
+        return -2;
+    int k = rand() % d->n[group];
+    int id = audio_sfx(&g_audio, name, k);
+    if (id < 0)
+        return -2;
+    d->cool[group] = DLG_BUFFER[group];
+    d->pending = id;
+    d->delay = d->start[group][k];
+    d->busy = d->delay + (float)g_audio.sfx[id].n / (float)(g_audio.sfx[id].rate ? g_audio.sfx[id].rate : 32000);
+    if (line)
+        *line = k;
+    return d->motion[group][k];
+}
+
+static void dialogue_update(Dialogue *d, Overlay *o, const Car *c, float dt)
+{
+    static int nox_was, low_was;
+    for (int k = 0; k < DLG_GROUPS; k++)
+        d->cool[k] -= dt;
+    d->busy -= dt;
+    if (d->pending >= 0 && (d->delay -= dt) <= 0) {
+        audio_play(&g_audio, d->pending, 1.0f, 1.0f, 0);
+        d->pending = -1;
+    }
+    int cool = c->turned || (c->ps_low && !low_was) || (c->nox_on && !nox_was);
+    nox_was = c->nox_on;
+    low_was = c->ps_low;
+    int m = -2;
+    if (cool)
+        m = dialogue_say(d, DLG_COOL, NULL);
+    /* shortcut: wall hits above 20 ft/s say a Hit line (dialogue.txt has no hit impulse
+       range in use; MinWreckImpulse is 20) */
+    if (m == -2 && c->impact > 20.0f)
+        m = dialogue_say(d, DLG_HIT, NULL);
+    if (m >= 0 && !c->ps_low) {
+        o->anim = m;
+        o->t = 0;
+        o->loop = 0;
+    }
+}
+
 static void stop_drive_sounds(DriveSfx *d)
 {
     if (d->burn >= 0)
@@ -1113,6 +1211,7 @@ int main(void)
             g_audio.engine_vol = 0.8f;
             drive_sounds(&dsfx, &g_car, dt);
             drive_overlay(&ov, &g_car, dt);
+            dialogue_update(&g_dlg, &ov, &g_car, dt);
 
             /* parked with no input: play one of the game's idle animations, then wait again */
             int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || in.steer_y != 0 || in.dpad_x ||
@@ -1123,6 +1222,10 @@ int main(void)
             if (idle_anim < 0 && g_n_idle && parked_t > 5.0f) { /* shortcut: 5 s trigger is a guess */
                 idle_anim = g_idle[rand() % g_n_idle];
                 idle_t = 0;
+                /* lm.aud [Idle]: the idle motion with its line (sound start frame) */
+                int m = dialogue_say(&g_dlg, DLG_IDLE, NULL);
+                if (m >= 0)
+                    idle_anim = m;
             }
             const VcaAnim *ia = NULL;
             if (idle_anim >= 0) {
@@ -1235,6 +1338,18 @@ int main(void)
                 glPopMatrix();
             }
             glDisable(GL_FOG);
+            if (g_have_ui && driving && have_char) {
+                /* HUD: the BoostMeterOverlay, bar length by NOX level, fill = NOX left */
+                int lv = (int)g_params.nox_level;
+                float cap = g_params.nox_base * g_params.nox_level;
+                if (lv >= 1 && lv <= 3 && cap > 0) {
+                    ui_begin();
+                    ui_draw_boost_meter(&g_ui, g_ui.boost_len[lv - 1], g_car.nox / cap);
+                    glColor4ub(255, 255, 255, 255);
+                    glDisable(GL_BLEND);
+                    glEnable(GL_DEPTH_TEST);
+                }
+            }
             vglSwapBuffers(GL_FALSE);
             if (logged_frames < 2)
                 plog("scene frame %d: done", logged_frames++);

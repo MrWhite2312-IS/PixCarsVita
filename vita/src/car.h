@@ -59,6 +59,8 @@ typedef struct {
     float ps_yaw, ps_hs_yaw, ps_min_speed, ps_max_speed, ps_threshold, ps_front, ps_rear, ps_torque;
     float ps_ls_front, ps_ls_rear, ps_ls_rear_steer, ps_min_angle, ps_max_angle, ps_min_boost, ps_max_boost;
     float ps_exit_time, ps_front_exit, ps_rear_exit, ps_exit_yaw, ps_steer_scale, ps_rear_steer_scale;
+    /* [LandingControl] */
+    float land_rear, trans_rear, land_front, trans_front, land_exit_angle, land_exit_yaw;
     /* [Preload] (jump) and [Wheelstand] (tilt, angle in radians) */
     float preload_time, max_preload, preload_charge, max_preload_time;
     float ws_angle, ws_roll_gain, ws_roll_rate_gain, ws_steer_scale, ws_torque_scale;
@@ -113,6 +115,11 @@ typedef struct {
     int ps, ps_low, ps_armed, ps_button; /* powerslide (+1013 b4), low-speed slide (b5), released (b7) */
     float ps_entry_x, ps_entry_speed, ps_exit_t, hb_yaw;
     int hb_on, front_drive;
+    int landing;               /* landing control (+1009 b2): set with all wheels in the air */
+    /* Backwards (0x386790): EBrake tap, release, press within 0.5 s at > 50 mph, steering
+       centred: a 180 at speed, then driving backwards until under 50 mph (+1013 b0) */
+    int backwards, turn_state, turn_auto, turned; float turn_t, turn_yaw, turn_dir, turn_vel[3];
+    float turn_rpm, turn_sign;
     float lat_scale[4], yaw_limit, boost, torque_scale;
     float nox, nox_delay; int nox_on;  /* engine +140, +164, +128 */
     /* measured each step: forward / lateral speed (+760 / +752), |v| (+1840), slip angle */

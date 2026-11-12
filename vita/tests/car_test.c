@@ -200,6 +200,43 @@ int main(int argc, char **argv)
     run(&c, &w, gas, 1.0f / 60);
     assert(c.burn_t > 0 && !c.burn_charge);
 
+    /* backwards: over 50 mph, EBrake tap, release, press: a 180 at speed, then tail first */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, gas, 6);
+    CarInput eb = { .throttle = 1, .ebrake = 1 };
+    float v_before = car_speed(&c), heading0 = atan2f(c.rot[6], c.rot[8]);
+    run(&c, &w, eb, 0.1f);
+    run(&c, &w, gas, 0.1f);
+    run(&c, &w, eb, 1.0f / 60);
+    assert(c.turn_state == 3 && c.turned);
+    run(&c, &w, gas, 0.5f);
+    float heading1 = atan2f(c.rot[6], c.rot[8]);
+    printf("backwards: %.1f mph -> %.1f mph, heading %.2f -> %.2f, backwards %d\n", v_before * 0.681818f,
+           car_speed(&c) * 0.681818f, heading0, heading1, c.backwards);
+    assert(c.backwards && car_speed(&c) < -60 && fabsf(fabsf(heading1 - heading0) - 3.14159f) < 0.4f);
+    run(&c, &w, gas, 2);
+    printf("backwards 2s on the gas: %.1f mph\n", car_speed(&c) * 0.681818f);
+    assert(c.backwards && car_speed(&c) < -60);
+    CarInput coast = { 0 };
+    for (int i = 0; i < 1200 && c.backwards; i++)
+        run(&c, &w, coast, 1.0f / 60);
+    run(&c, &w, coast, 1);
+    printf("backwards, slowed: backwards %d, %.1f mph (spun back round)\n", c.backwards, car_speed(&c) * 0.681818f);
+    assert(!c.backwards && car_speed(&c) > 0);
+
+    /* landing: off a jump, landing frictions until the car runs straight again */
+    car_spawn(&c, &P, &w, (float[3]){ 0, 0, -1500 }, 0);
+    run(&c, &w, gas, 4);
+    run(&c, &w, back, 0.3f);
+    run(&c, &w, fwd, 1.0f / 60);
+    int saw_landing = 0;
+    for (int i = 0; i < 180; i++) {
+        run(&c, &w, gas, 1.0f / 60);
+        saw_landing |= c.landing && c.grounded > 0;
+    }
+    printf("landing: control seen on touchdown %d, now %d\n", saw_landing, c.landing);
+    assert(saw_landing && !c.landing);
+
     /* straight into the wall at z = 1600 */
     car_spawn(&c, &P, &w, (float[3]){ 0, 0, 1200 }, 0);
     run(&c, &w, idle, 1);

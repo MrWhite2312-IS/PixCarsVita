@@ -14,7 +14,7 @@
 #define AUDIO_MAX_KEYS 16
 #define AUDIO_MAX_GEARS 8
 #define AUDIO_MAX_TRACKS 32
-#define AUDIO_MAX_SFX 32
+#define AUDIO_MAX_SFX 64
 #define AUDIO_MAX_VOICES 12
 
 typedef struct { int16_t pred; int8_t index; } ImaState;
