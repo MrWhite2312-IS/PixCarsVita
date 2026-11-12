@@ -46,7 +46,7 @@ typedef struct {
     float rpm[16], hp[16], gear[8], final_ratio, loss, min_rpm, engine_braking;
     float engine_inertia, idle_throttle, max_k, pump_torque_scale, max_pump_torque;
     float low_rpm, low_up, low_down, high_rpm, high_up, high_down;
-    float shift_up_time, shift_up_throttle, shift_down_time, shift_down_throttle;
+    float shift_time, shift_up_time, shift_up_throttle, shift_down_time, shift_down_throttle;
     float aero_area, aero_drag;
     /* [Powerslide] */
     float ps_hs_yaw, ps_min_speed, ps_max_speed, ps_threshold, ps_front, ps_rear, ps_torque;
@@ -80,7 +80,7 @@ typedef struct {
     float slip[4];             /* longitudinal slip ratio (relaxed at low speed, as in the game) */
     float fx_prev[4];          /* last longitudinal tyre force (lbf), loads the wheel spin */
     int gear;                  /* 1..n, -1 reverse */
-    float rpm, shift_t;
+    float rpm, shift_t, shift_cool;
     int ps;                    /* powerslide: 0 off, 1 sliding, 2 exiting */
     float ps_entry_speed, ps_timer, hb_yaw;
     float rear_steer, lat_scale[4], yaw_limit, boost;

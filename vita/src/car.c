@@ -298,7 +298,7 @@ static const CarParams MCQ_DEFAULTS = {
     .engine_braking = 10, .engine_inertia = 0.2f, .idle_throttle = 0.01f,
     .max_k = 2.5f, .pump_torque_scale = 0.1f, .max_pump_torque = 1000,
     .low_rpm = 1000, .low_up = 5500, .low_down = 2000, .high_rpm = 1500, .high_up = 6700, .high_down = 4500,
-    .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
+    .shift_time = 1, .shift_up_time = 0.3f, .shift_up_throttle = 0.5f, .shift_down_time = 0.25f, .shift_down_throttle = 0.35f,
     .aero_area = 35, .aero_drag = 0.3f,
     .ps_hs_yaw = 1.65f, .ps_min_speed = 23, .ps_max_speed = 200, .ps_threshold = 0.95f,
     .ps_front = 0.9f, .ps_rear = 0.74f, .ps_torque = 10.8f, .ps_exit_time = 0.45f,
@@ -440,6 +440,7 @@ void car_params_parse(CarParams *p, const char *t)
     ini_f(t, E, "HighLoadRPM", &p->high_rpm, 1);
     ini_f(t, E, "HighLoadUpShiftRPM", &p->high_up, 1);
     ini_f(t, E, "HighLoadDownShiftRPM", &p->high_down, 1);
+    ini_f(t, E, "ShiftTime", &p->shift_time, 1);
     ini_f(t, E, "ShiftUpDuration", &p->shift_up_time, 1);
     ini_f(t, E, "ShiftUpThrottle", &p->shift_up_throttle, 1);
     ini_f(t, E, "ShiftDownDuration", &p->shift_down_time, 1);
@@ -556,7 +557,6 @@ static float drivetrain(Car *c, float dt)
     float dir = reverse ? -1.0f : 1.0f;
     float ratio = p->gear[reverse ? 0 : c->gear - 1] * p->final_ratio;
     float load = reverse ? c->brake : c->gas;
-    int high = load > 0.5f;
     if (c->rpm < p->min_rpm)
         c->rpm = p->min_rpm;
 
@@ -575,35 +575,43 @@ static float drivetrain(Car *c, float dt)
     if (ratio > 0 && w > 0)
         out *= c->boost; /* engine +104: the powerslide torque scale */
 
-    /* automatic shifts at the load-dependent RPMs (shortcut: the PS2 shift scheduler is not
-       decoded; this uses the .phy thresholds on engine rpm with the shift durations) */
-    if (!reverse && c->shift_t <= 0) {
-        float up = high ? p->high_up : p->low_up, down = high ? p->high_down : p->low_down;
-        /* turbine rpm the next lower gear would give: only drop if it stays under the up point */
-        float lower = c->gear > 1 ? trans * p->gear[c->gear - 2] / p->gear[c->gear - 1] : 0;
+    /* automatic gearbox (PS2 0x225540): load = converter slip between Low/HighLoadRPM; shift
+       points blend Low->High; no shifting while braking or within ShiftTime of the last shift;
+       during ShiftUp/DownDuration the throttle is replaced by ShiftUp/DownThrottle */
+    float lt = (slip - p->low_rpm) / (p->high_rpm - p->low_rpm);
+    lt = fmaxf(0.0f, fminf(1.0f, lt));
+    float up = p->low_up + (p->high_up - p->low_up) * lt;
+    float down = p->low_down + (p->high_down - p->low_down) * lt;
+    if (c->shift_cool > 0)
+        c->shift_cool -= dt;
+    else if (!reverse && c->brake <= 0) {
         if (c->rpm > up && c->gear < p->n_gears) {
             c->gear++;
             c->shift_t = p->shift_up_time;
-        } else if (c->rpm < down && c->gear > 1 && lower < up * 0.9f) {
+            c->shift_cool = p->shift_time;
+        } else if (c->rpm < down && c->gear > 1) {
             c->gear--;
             c->shift_t = -p->shift_down_time;
+            c->shift_cool = p->shift_time;
         }
     }
-    float shift_scale = 1;
+    float shift_throttle = -1;
     if (c->shift_t > 0) {
-        shift_scale = p->shift_up_throttle;
+        shift_throttle = p->shift_up_throttle;
         c->shift_t = fmaxf(0, c->shift_t - dt);
     } else if (c->shift_t < 0) {
-        shift_scale = p->shift_down_throttle;
+        shift_throttle = p->shift_down_throttle;
         c->shift_t = fminf(0, c->shift_t + dt);
     }
+    if (shift_throttle >= 0)
+        load = shift_throttle;
 
     /* engine torque: gross curve (5252 HP / rpm + friction) times throttle (plus IdleThrottle),
        minus friction EngineBraking * 1e-6 * rpm^2 */
     float fr = p->engine_braking * 1e-6f;
     float rpm = c->rpm;
     float gross = interp(p->rpm, p->hp, p->n_rpm, rpm) * 5252.0f / fmaxf(rpm, 1.0f) + fr * rpm * rpm;
-    float te = gross * fminf(load * shift_scale + p->idle_throttle, 1.0f) - fr * rpm * rpm;
+    float te = gross * fminf(load + p->idle_throttle, 1.0f) - fr * rpm * rpm;
     /* engine speed, implicit in the pump torque's slope */
     float inv_i = 1.0f / p->engine_inertia;
     float denom = 1.0f + dt * k * fabsf(slip) * inv_i;
