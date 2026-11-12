@@ -29,7 +29,7 @@ int16_t ima_step(ImaState *s, int n)
 }
 
 /* Find the "data" chunk of a RIFF .wav; returns its size and leaves f at its start. */
-static uint32_t wav_data(FILE *f, uint32_t *rate)
+static uint32_t wav_data(FILE *f, uint32_t *rate, int *channels)
 {
     uint8_t h[12];
     if (fread(h, 1, 12, f) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4))
@@ -44,6 +44,8 @@ static uint32_t wav_data(FILE *f, uint32_t *rate)
             if (fread(fm, 1, 8, f) != 8)
                 return 0;
             *rate = fm[4] | fm[5] << 8 | fm[6] << 16 | (uint32_t)fm[7] << 24;
+            if (channels)
+                *channels = fm[2] | fm[3] << 8;
             fseek(f, (long)(n - 8 + (n & 1)), SEEK_CUR);
         } else if (!memcmp(c, "data", 4)) {
             return n;
@@ -64,7 +66,7 @@ static void open_track(Audio *a)
         snprintf(path, sizeof path, "%smusic/%s.wav", a->dir, a->tracks[a->cur_track]);
         a->music = fopen(path, "rb");
         if (a->music) {
-            a->music_left = wav_data(a->music, &a->music_rate);
+            a->music_left = wav_data(a->music, &a->music_rate, NULL);
             if (!a->music_left) {
                 fclose(a->music);
                 a->music = NULL;
@@ -92,7 +94,8 @@ static int load_ima_mono(const char *path, int16_t **pcm, uint32_t *n, uint32_t 
     if (!f)
         return 0;
     *rate = 0;
-    uint32_t bytes = wav_data(f, rate);
+    int ch = 1;
+    uint32_t bytes = wav_data(f, rate, &ch);
     uint8_t *buf = bytes ? malloc(bytes) : NULL;
     if (!buf || fread(buf, 1, bytes, f) != bytes) {
         free(buf);
@@ -105,13 +108,22 @@ static int load_ima_mono(const char *path, int16_t **pcm, uint32_t *n, uint32_t 
         free(buf);
         return 0;
     }
-    ImaState s = { 0, 0 };
-    for (uint32_t i = 0; i < bytes; i++) {
-        (*pcm)[2 * i] = ima_step(&s, buf[i] & 15);
-        (*pcm)[2 * i + 1] = ima_step(&s, buf[i] >> 4);
+    ImaState s = { 0, 0 }, r = { 0, 0 };
+    if (ch == 2) {
+        /* stereo: one byte per frame, low nibble left (the UI bank, sfx/ui_fe.aud).
+           shortcut: voices are mono, so the two channels are averaged; add stereo voices if
+           a positioned/panned UI sound ever needs it */
+        for (uint32_t i = 0; i < bytes; i++)
+            (*pcm)[i] = (int16_t)((ima_step(&s, buf[i] & 15) + ima_step(&r, buf[i] >> 4)) / 2);
+        *n = bytes;
+    } else {
+        for (uint32_t i = 0; i < bytes; i++) {
+            (*pcm)[2 * i] = ima_step(&s, buf[i] & 15);
+            (*pcm)[2 * i + 1] = ima_step(&s, buf[i] >> 4);
+        }
+        *n = 2 * bytes;
     }
     free(buf);
-    *n = 2 * bytes;
     return 1;
 }
 

@@ -28,6 +28,7 @@ typedef struct {
 } UiFont;
 
 typedef struct {
+    char name[24];             /* component name, spaces as '_' */
     int layer, kind;           /* kind 0 icon, 1 text */
     int tex, font;
     char id[48];               /* text: string ID */
@@ -48,6 +49,7 @@ typedef struct {
 
 typedef struct {
     unsigned gl_tex[32];
+    int tex_w[32], tex_h[32];
     char tex_names[32][48];
     int n_tex;
     UiFont font[UI_MAX_FONTS];
@@ -63,6 +65,10 @@ typedef struct {
     int sign_font;
     char sign_label[48];
     uint8_t sign_rgba[4], sign_sel_rgba[4];
+    float sign_anim;           /* AnimationDuration: one sign step, seconds */
+    /* FrontEndMenuBackground [General]: duration, max/final circle scale, circle ratio,
+       header speed, TitleX1..3 */
+    float bg[8];
     UiSign sign[UI_MAX_SIGNS];
     int n_sign;
     UiCamera cam[4];
@@ -80,8 +86,14 @@ int ui_tex(const Ui *ui, const char *name);
 /* 2D drawing: call ui_begin once per frame before the draw calls (sets an ortho view). */
 void ui_begin(void);
 void ui_draw_layer(const Ui *ui, const char *layer);
-/* The sign menu: selected item's icon and its label (pulsing, with arrows). */
-void ui_draw_signs(const Ui *ui, int selected, float time);
+/* The menu background with its intro animation as the PS2 game plays it (0x27b210):
+   p 0..1 over bg[0] seconds (reverse it for the outro); header_t: seconds since the intro
+   ended, scrolls the checkered header strip. */
+void ui_draw_background(const Ui *ui, float p, float header_t);
+/* The sign menu (PS2 0x2490d0 / 0x249560): five signs, the selected one centred; dir +1/-1
+   slides them one step towards the next/previous item, t 0..1 over sign_anim seconds.
+   time drives the label's pulse. */
+void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time);
 void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scale, const uint8_t rgba[4], int hj, int vj);
 
 #endif

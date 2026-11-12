@@ -9,9 +9,11 @@ Output in <out_dir>:
     g <code> <u0> <v0> <u1> <v1> <w> <h> <xoff> <yoff>
     str <ID> <text>
     layer <name>                                     followed by its components:
-    icon <tex> <x> <y> <w> <h> <u0> <u1> <v0> <v1> <r> <g> <b> <a> <hj> <vj>
-    text <font> <ID> <x> <y> <scale> <r> <g> <b> <a> <hj> <vj>
-    signs <x> <y> <font> <ID> <lx> <ly> <rgba> <selected rgba>   CarsUISignMenu + its label
+    icon <name> <tex> <x> <y> <w> <h> <u0> <u1> <v0> <v1> <r> <g> <b> <a> <hj> <vj>
+    text <name> <font> <ID> <x> <y> <scale> <r> <g> <b> <a> <hj> <vj>
+    bg <duration> <max_circle> <final_circle> <circle_ratio> <header_speed> <title_x1> <x2> <x3>
+                                                     FrontEndMenuBackground [General] (+ code defaults)
+    signs <x> <y> <font> <ID> <lx> <ly> <rgba> <selected rgba> <anim_s>   CarsUISignMenu + label
     sign <ID> <tex>                                  one of its items
     camera <name> <px> <py> <pz> <fx> <fy> <fz>      front-end animated camera (game space)
   Coordinates are the game's 640x480 UI space; hj/vj: 0 left/top, 1 centre, 2 right/bottom.
@@ -170,10 +172,18 @@ def main():
         lyr = ini(idx.read(base + ".lyr").decode("latin-1"))
         lyt = ini(idx.read(base + ".lyt").decode("latin-1")) if base + ".lyt" in idx.files else {}
         lines.append(f"layer {layer}")
+        gen = lyr.get("General", {})
+        if layer == "FrontEndMenuBackground":
+            # defaults as the PS2 loader (0x27b080) passes them; TitleX* are not in the .lyr
+            g = [float(gen.get(k, d)) for k, d in (("backgroundanimduration", 0.5), ("maximumcirclescale", 2.7),
+                 ("finalcirclescale", 2.0), ("circlegrowingratio", 0.8), ("headeranimationspeed", 1.0),
+                 ("titlex1", 400), ("titlex2", 20), ("titlex3", 55))]
+            lines.append("bg " + " ".join(f"{v:g}" for v in g))
         for comp in lyr["Root"].get("component*", []):
             kv = dict(lyr.get(comp, {}))
             kv.update(lyt.get(comp, {}))
             typ = kv.get("type", "")
+            cname = comp.replace(" ", "_")
             x, y = float(kv.get("x", 0)), float(kv.get("y", 0))
             hj = {"left": 0, "center": 1, "right": 2}[kv.get("horizontal_justification", "left").lower()]
             vj = {"top": 0, "center": 1, "bottom": 2}[kv.get("vertical_justification", "top").lower()]
@@ -188,11 +198,11 @@ def main():
                 h = float(kv.get("height", info["height"] * sc))
                 u0, u1, v0, v1 = (float(c) for c in kv.get("texcoords", "0,1,0,1").split(","))
                 r, g, b, al = color(kv.get("color"))
-                lines.append(f"icon {t} {x:g} {y:g} {w:g} {h:g} {u0:g} {u1:g} {v0:g} {v1:g} {r} {g} {b} {al} {hj} {vj}")
+                lines.append(f"icon {cname} {t} {x:g} {y:g} {w:g} {h:g} {u0:g} {u1:g} {v0:g} {v1:g} {r} {g} {b} {al} {hj} {vj}")
             elif typ in ("CarsUIText", "CarsUIMultiStateText", "CarsUIMultiLineTextComponent"):
                 r, g, b, al = color(kv.get("color"))
                 used.add(kv["textid"])
-                lines.append(f"text {font(kv['font'])} {kv['textid']} {x:g} {y:g} {float(kv.get('scale', 1)):g} "
+                lines.append(f"text {cname} {font(kv['font'])} {kv['textid']} {x:g} {y:g} {float(kv.get('scale', 1)):g} "
                              f"{r} {g} {b} {al} {hj} {vj}")
             elif typ == "CarsUISignMenu":
                 lab = lyr[kv["component"]]
@@ -200,7 +210,8 @@ def main():
                 sr, sg, sb, sa = color(lab.get("selectedcolor"))
                 used.add(lab["textid"])
                 lines.append(f"signs {x:g} {y:g} {font(lab['font'])} {lab['textid']} {float(lab.get('x', 0)):g} "
-                             f"{float(lab.get('y', 0)):g} {r} {g} {b} {al} {sr} {sg} {sb} {sa}")
+                             f"{float(lab.get('y', 0)):g} {r} {g} {b} {al} {sr} {sg} {sb} {sa} "
+                             f"{float(kv.get('animationduration', 1)):g}")  # 1 s: PS2 0x247ae8 default
                 for item in kv.get("menuitem*", []):
                     it = lyr[item]
                     used.add(it["textid"])

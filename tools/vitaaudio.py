@@ -102,6 +102,13 @@ def main():
              f"0 0 {sus['minlevelattenuation']} {sus['maxlevelattenuation']} {sus['minlevelvelocity']}")
     for i in (1, 2, 3):
         take("impact", f"SFX\\Impact\\imp_veh_hard_0{i}")
+    # front end: the UIResponseEmitter bank (sfx/ui_fe.aud) and the drive-in's crickets loop
+    # (scenes/fe/fe.aud [SoultreeSound1]); named after their files, e.g. fe_select_continue
+    ui = ini_sections(idx.read(BS.join(["data", "audio", "sfx", "ui_fe.aud"])).decode("latin-1"))["uiresponseemitter"]
+    for i in range(1, int(ui[f"numsounds"]) + 1):
+        take(ui[f"sound{i}"].rsplit(BS, 1)[-1].lower(), ui[f"sound{i}"])
+    fe = ini_sections(idx.read(BS.join(["data", "scenes", "fe", "fe.aud"])).decode("latin-1"))["soultreesound1"]
+    take(fe["refname"].lower(), fe["soundresourcefile"])
     open(os.path.join(sfxd, "sfx.txt"), "w").write("\n".join(rows) + "\n")
     print(f"sfx: {len(rows)} sounds")
 

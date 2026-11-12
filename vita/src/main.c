@@ -740,6 +740,13 @@ static void play_movie(const char *name)
     movie_stop();
 }
 
+/* one of the front end's UIResponseEmitter sounds (sfx/ui_fe.aud), by file name */
+static int ui_sound(const char *name, int loop)
+{
+    int id = audio_sfx(&g_audio, name, 0);
+    return id >= 0 ? audio_play(&g_audio, id, 1.0f, 1.0f, loop) : -1;
+}
+
 /* The game's front end (act\FrontEndUI, scene FE, the drive-in): the "Title Screen" page over
    camera FE_Wel, then the "MainMenu" page (menu background + sign menu) over FE_Sel. Returns
    when Story Mode is chosen; Quit Game exits. Without the exported UI it returns at once. */
@@ -755,8 +762,10 @@ static void run_front_end(void)
     ui_set_str(ui, "STR_DYN_MENU_TITLE", ui_str(ui, "STR_MAIN_MENU"));
     ui_set_str(ui, "STR_DYN_MENU_ACCEPT_TEXT", ui_str(ui, "STR_SELECT"));
     ui_set_str(ui, "STR_DYN_MENU_ACCEPT_TEXT_BTN", "X"); /* shortcut: the PC showed its key name; Vita Cross */
-    int page = 0, sel = 0;
-    float t = 0;
+    /* page 0 title, 1 main menu. bg_p: the menu background's intro (0..1); leaving: -1 back to
+       the title, +1 into the story, played as the intro reversed (the game's outro state) */
+    int page = 0, sel = 0, dir = 0, leaving = 0, crickets = -1;
+    float t = 0, bg_p = 0, header_t = 0, slide = 0;
     uint32_t prev = ~0u; /* ignore buttons still held from the previous screen */
     SceUInt64 last = sceKernelGetProcessTimeWide();
     plog("front end");
@@ -766,26 +775,59 @@ static void run_front_end(void)
         uint32_t pressed = pad.buttons & ~prev;
         prev = pad.buttons;
         SceUInt64 now = sceKernelGetProcessTimeWide();
-        t += (float)(now - last) / 1000000.0f;
+        float dt = (float)(now - last) / 1000000.0f;
         last = now;
+        t += dt;
         if (page == 0) {
-            if (pressed & (SCE_CTRL_START | SCE_CTRL_CROSS))
-                page = 1;
-        } else if (ui->n_sign) {
-            if (pressed & SCE_CTRL_LEFT)
-                sel = (sel + ui->n_sign - 1) % ui->n_sign;
-            if (pressed & SCE_CTRL_RIGHT)
-                sel = (sel + 1) % ui->n_sign;
-            if (pressed & SCE_CTRL_CIRCLE)
+            if (pressed & (SCE_CTRL_START | SCE_CTRL_CROSS)) {
+                ui_sound("fe_select_continue", 0);
+                ui_sound("fe_menu_in", 0);
+                page = 1, bg_p = 0, header_t = 0, leaving = 0;
+                /* the drive-in's crickets (fe.aud SoultreeSound1) sit 140 ft from FE_Sel, inside
+                   their 400 ft MinDistance: full volume on the menu, silent from FE_Wel */
+                crickets = ui_sound("fe_crickets", 1);
+            }
+        } else if (leaving) {
+            bg_p -= dt / ui->bg[0];
+            if (bg_p <= 0) {
+                if (crickets >= 0)
+                    g_audio.voice[crickets].active = 0;
+                crickets = -1;
+                if (leaving > 0)
+                    break;
                 page = 0;
-            if (pressed & SCE_CTRL_CROSS) {
+            }
+        } else {
+            bg_p = fminf(1.0f, bg_p + dt / ui->bg[0]);
+            if (bg_p >= 1)
+                header_t += dt;
+            if (dir) {
+                slide += dt / ui->sign_anim;
+                if (slide >= 1)
+                    sel = (sel + dir + ui->n_sign) % ui->n_sign, dir = 0;
+            }
+            if (!dir && ui->n_sign && (pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {
+                dir = (pressed & SCE_CTRL_RIGHT) ? 1 : -1;
+                slide = 0;
+                ui_sound("fe_sign_shuffle", 0);
+            }
+            if (pressed & SCE_CTRL_CIRCLE) {
+                ui_sound("fe_back", 0);
+                ui_sound("fe_menu_out", 0);
+                leaving = -1;
+            }
+            if (!dir && (pressed & SCE_CTRL_CROSS) && ui->n_sign) {
                 const char *id = ui->sign[sel].id;
                 plog("main menu: %s", id);
-                if (!strcmp(id, "STR_STORY_MODE"))
-                    break;
-                if (!strcmp(id, "STR_EXIT_GAME"))
+                if (!strcmp(id, "STR_STORY_MODE")) {
+                    ui_sound("fe_select_continue", 0);
+                    ui_sound("fe_menu_out", 0);
+                    leaving = 1;
+                } else if (!strcmp(id, "STR_EXIT_GAME")) {
                     sceKernelExitProcess(0);
-                /* shortcut: Arcade, Versus, Options and Bonus Content pages are not ported yet */
+                } else {
+                    ui_sound("fe_bad_input", 0); /* shortcut: Arcade, Versus, Options, Bonus not ported yet */
+                }
             }
         }
         const UiCamera *cm = ui_camera(ui, page ? "FE_Sel" : "FE_Wel");
@@ -802,8 +844,9 @@ static void run_front_end(void)
         if (page == 0) {
             ui_draw_layer(ui, "TitleScreen");
         } else {
-            ui_draw_layer(ui, "FrontEndMenuBackground");
-            ui_draw_signs(ui, sel, t);
+            ui_draw_background(ui, bg_p, header_t);
+            if (bg_p >= 1 || leaving)
+                ui_draw_signs(ui, sel, dir, slide, t);
         }
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);

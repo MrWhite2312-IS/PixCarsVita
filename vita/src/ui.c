@@ -54,8 +54,14 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
     if (r)
         return r;
     ui->n_tex = s.n_tex < 32 ? (int)s.n_tex : 32;
-    for (int i = 0; i < ui->n_tex; i++)
+    for (int i = 0; i < ui->n_tex; i++) {
         ui->gl_tex[i] = upload(&s.tex[i]);
+        ui->tex_w[i] = (int)s.tex[i].width;
+        ui->tex_h[i] = (int)s.tex[i].height;
+    }
+    const float bg_defaults[8] = { 0.5f, 2.7f, 2.0f, 0.8f, 1.0f, 400, 20, 55 };
+    memcpy(ui->bg, bg_defaults, sizeof bg_defaults);
+    ui->sign_anim = 1.0f;
     vcs_free(&s);
 
     snprintf(path, sizeof path, "%sui.txt", dir);
@@ -91,8 +97,8 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
         } else if (!strncmp(line, "icon ", 5) && ui->n_item < UI_MAX_ITEMS) {
             UiItem *it = &ui->item[ui->n_item];
             int c[4];
-            if (sscanf(line + 5, "%d %f %f %f %f %f %f %f %f %d %d %d %d %d %d", &it->tex, &it->x, &it->y, &it->w, &it->h,
-                       &it->u0, &it->u1, &it->v0, &it->v1, &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj) == 15) {
+            if (sscanf(line + 5, "%23s %d %f %f %f %f %f %f %f %f %d %d %d %d %d %d", it->name, &it->tex, &it->x, &it->y, &it->w, &it->h,
+                       &it->u0, &it->u1, &it->v0, &it->v1, &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj) == 16) {
                 for (int k = 0; k < 4; k++)
                     it->rgba[k] = (uint8_t)c[k];
                 it->layer = layer;
@@ -102,8 +108,8 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
         } else if (!strncmp(line, "text ", 5) && ui->n_item < UI_MAX_ITEMS) {
             UiItem *it = &ui->item[ui->n_item];
             int c[4];
-            if (sscanf(line + 5, "%63s %47s %f %f %f %d %d %d %d %d %d", a, it->id, &it->x, &it->y, &it->scale,
-                       &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj) == 11) {
+            if (sscanf(line + 5, "%23s %63s %47s %f %f %f %d %d %d %d %d %d", it->name, a, it->id, &it->x, &it->y, &it->scale,
+                       &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj) == 12) {
                 for (int k = 0; k < 4; k++)
                     it->rgba[k] = (uint8_t)c[k];
                 it->font = find_font(ui, a);
@@ -113,15 +119,18 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
             }
         } else if (!strncmp(line, "signs ", 6)) {
             int c[8];
-            if (sscanf(line + 6, "%f %f %63s %47s %f %f %d %d %d %d %d %d %d %d", &ui->sign_x, &ui->sign_y, a,
+            if (sscanf(line + 6, "%f %f %63s %47s %f %f %d %d %d %d %d %d %d %d %f", &ui->sign_x, &ui->sign_y, a,
                        ui->sign_label, &ui->label_x, &ui->label_y, &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6],
-                       &c[7]) == 14) {
+                       &c[7], &ui->sign_anim) >= 14) {
                 ui->sign_font = find_font(ui, a);
                 for (int k = 0; k < 4; k++) {
                     ui->sign_rgba[k] = (uint8_t)c[k];
                     ui->sign_sel_rgba[k] = (uint8_t)c[4 + k];
                 }
             }
+        } else if (!strncmp(line, "bg ", 3)) {
+            sscanf(line + 3, "%f %f %f %f %f %f %f %f", &ui->bg[0], &ui->bg[1], &ui->bg[2], &ui->bg[3], &ui->bg[4],
+                   &ui->bg[5], &ui->bg[6], &ui->bg[7]);
         } else if (sscanf(line, "sign %47s %d", b, &i) == 2 && ui->n_sign < UI_MAX_SIGNS) {
             snprintf(ui->sign[ui->n_sign].id, sizeof ui->sign[0].id, "%s", b);
             ui->sign[ui->n_sign++].tex = i;
@@ -226,37 +235,85 @@ void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scal
     }
 }
 
+/* one component; dx shifts it in UI space, size (if > 0) replaces an icon's size, alpha scales its alpha */
+static void draw_item(const Ui *ui, const UiItem *it, float dx, float size, float alpha)
+{
+    uint8_t c[4] = { it->rgba[0], it->rgba[1], it->rgba[2], (uint8_t)(it->rgba[3] * alpha) };
+    if (it->kind == 1) {
+        ui_text(ui, it->font, ui_str(ui, it->id), it->x + dx, it->y, it->scale, c, it->hj, it->vj);
+        return;
+    }
+    float w = (size > 0 ? size : it->w) * SX, h = (size > 0 ? size : it->h) * SY;
+    float x = (it->x + dx) * SX - w * it->hj * 0.5f, y = it->y * SY - h * it->vj * 0.5f;
+    quad(ui->gl_tex[it->tex], x, y, w, h, it->u0, it->v0, it->u1, it->v1, c);
+}
+
 void ui_draw_layer(const Ui *ui, const char *layer)
 {
     int l = find_layer((Ui *)ui, layer);
+    for (int i = 0; i < ui->n_item; i++)
+        if (l >= 0 && ui->item[i].layer == l)
+            draw_item(ui, &ui->item[i], 0, 0, 1);
+}
+
+static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+void ui_draw_background(const Ui *ui, float p, float header_t)
+{
+    int l = find_layer((Ui *)ui, "FrontEndMenuBackground");
+    const float *g = ui->bg; /* duration, max circle, final circle, ratio, header speed, title x1..x3 */
+    float a = clamp01(p / 0.5f), b = clamp01((p - 0.5f) / 0.5f);
+    /* idle: the checkered strip steps left one pixel at a time, 32 px per HeaderAnimationSpeed */
+    float hs = p >= 1 ? floorf(32.0f * fmodf(header_t, g[4]) / g[4]) : 0;
+    /* red circle: grows to the max over CircleGrowingRatio of its half, then settles */
+    float circle = b < g[3] ? b / g[3] * g[1] : g[1] - (b - g[3]) / (1 - g[3]) * (g[1] - g[2]);
+    /* title: fades in while sliding TitleX1 -> TitleX2 (80%) -> TitleX3 */
+    float tx = p <= 0.8f ? g[5] - p * (g[5] - g[6]) / 0.8f : g[6] + (p - 0.8f) * (g[7] - g[6]) / 0.2f;
     for (int i = 0; i < ui->n_item; i++) {
         const UiItem *it = &ui->item[i];
-        if (it->layer != l || l < 0)
+        if (l < 0 || it->layer != l)
             continue;
-        if (it->kind == 1) {
-            ui_text(ui, it->font, ui_str(ui, it->id), it->x, it->y, it->scale, it->rgba, it->hj, it->vj);
-            continue;
-        }
-        float w = it->w * SX, h = it->h * SY;
-        float x = it->x * SX - w * it->hj * 0.5f, y = it->y * SY - h * it->vj * 0.5f;
-        quad(ui->gl_tex[it->tex], x, y, w, h, it->u0, it->v0, it->u1, it->v1, it->rgba);
+        const char *n = it->name;
+        if (!strncmp(n, "Header", 6))          /* Header1..3, HeaderBackground: slide in from the right */
+            draw_item(ui, it, 640.0f * (1 - a) - (n[6] != 'B' ? hs : 0), 0, 1);
+        else if (!strncmp(n, "Footer", 6))     /* FooterLeft/Middle/Right: from the left */
+            draw_item(ui, it, -640.0f * (1 - a), 0, 1);
+        else if (!strcmp(n, "Red_Circle"))
+            draw_item(ui, it, 0, ui->tex_w[it->tex] * circle, 1);
+        else if (!strcmp(n, "Title"))
+            draw_item(ui, it, tx - it->x, 0, p);
+        else                                   /* button texts and labels fade in */
+            draw_item(ui, it, 0, 0, p);
     }
 }
 
-void ui_draw_signs(const Ui *ui, int selected, float time)
+void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time)
 {
-    if (selected < 0 || selected >= ui->n_sign)
+    int n = ui->n_sign;
+    if (n <= 0 || selected < 0 || selected >= n)
         return;
-    /* shortcut: CarsUISignMenu's sliding sign animation (AnimationDuration .35) is not decoded
-       from the PS2 code yet; the selected sign's 128x128 icon sits at the menu position */
-    static const uint8_t white[4] = { 255, 255, 255, 255 }, yellow[4] = { 170, 123, 13, 255 };
-    const UiSign *sg = &ui->sign[selected];
-    float sz = 128.0f * SY;
-    quad(ui->gl_tex[sg->tex], ui->sign_x * SX - sz / 2, ui->sign_y * SY - sz / 2, sz, sz, 0, 0, 1, 1, white);
-    /* label: PulseIfSelected (MaxPulseScale 1.2, PulseDuration .3) and HighlightArrows */
+    /* slot tables at 0x48dab0 / 0x48dad0 / 0x48daf0: x offset, scale, brightness.
+       shortcut: always five slots (the game shows 3 or 1 for menus under 5 or 3 items) */
+    static const float SX5[5] = { -248, -144, 0, 144, 248 }, SC5[5] = { 0.5f, 0.75f, 1, 0.75f, 0.5f };
+    t = clamp01(t);
+    for (int k = 0; k < 5; k++) {
+        int to = k - dir; /* sliding to the next item moves every sign one slot left */
+        if (dir && (to < 0 || to > 4))
+            continue;   /* the sign leaving the row disappears at once, as in the game */
+        float x = SX5[k] + (dir ? (SX5[to] - SX5[k]) * t : 0);
+        float sc = SC5[k] + (dir ? (SC5[to] - SC5[k]) * t : 0); /* brightness = scale */
+        const UiSign *sg = &ui->sign[((selected + k - 2) % n + n) % n];
+        uint8_t c[4] = { (uint8_t)(255 * sc), (uint8_t)(255 * sc), (uint8_t)(255 * sc), 255 };
+        float sz = ui->tex_w[sg->tex] * sc;
+        quad(ui->gl_tex[sg->tex], (ui->sign_x + x) * SX - sz * SY / 2, ui->sign_y * SY - sz * SY / 2, sz * SY,
+             sz * SY, 0, 0, 1, 1, c);
+    }
+    /* label: PulseIfSelected (MaxPulseScale 1.2, PulseDuration .3) and HighlightArrows.
+       shortcut: pulse is a 0.3 s up / 0.3 s down triangle, the PS2 curve is not decoded */
+    static const uint8_t yellow[4] = { 170, 123, 13, 255 };
     float ph = fmodf(time, 0.6f) / 0.3f;
     float pulse = 1.0f + 0.2f * (ph < 1 ? ph : 2 - ph);
-    const char *txt = ui_str(ui, sg->id);
+    const char *txt = ui_str(ui, ui->sign[selected].id);
     float lx = ui->sign_x + ui->label_x, ly = ui->sign_y + ui->label_y;
     ui_text(ui, ui->sign_font, txt, lx, ly, pulse, ui->sign_sel_rgba, 1, 1);
     int at = ui_tex(ui, "highlight_arrow");

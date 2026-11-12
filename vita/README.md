@@ -55,6 +55,9 @@ Copia `extracted/vita/ui/` a `ux0:data/pixcars/ui/` y `fe.vcs` a `ux0:data/pixca
 Tras los logos sale la pantalla de título («Pulsa el botón START»); START o ✕ abre el menú
 principal (←/→ elige, ✕ acepta, ○ vuelve al título). «Modo historia» entra a Radiator
 Springs; «Salir del juego» cierra. En juego, START vuelve al menú.
+Animaciones (entrada del fondo, franja de cuadros, carrusel de carteles) y sonidos del menú
+(`sfx/ui_fe.aud`, grillos del autocine) salen del juego: tras actualizar, vuelve a ejecutar
+`vitaaudio.py` y `vitaui.py` y copia `audio/` y `ui/` de nuevo.
 
 ## 3. Compilar
 

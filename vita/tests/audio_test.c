@@ -28,7 +28,11 @@ int main(int argc, char **argv)
     assert(audio_speed_to_rpm(&a, 170) == 5500);
     /* effects: fx.aud roles, a one-shot voice plays and frees itself */
     printf("sfx=%d\n", a.n_sfx);
-    assert(a.n_sfx == 10 && audio_sfx(&a, "suspension", 3) >= 0 && audio_sfx(&a, "impact", 3) < 0);
+    assert(a.n_sfx == 23 && audio_sfx(&a, "suspension", 3) >= 0 && audio_sfx(&a, "impact", 3) < 0);
+    /* stereo UI effect: one ADPCM byte per frame -> fe_left_right.wav's 1280 data bytes */
+    int lr = audio_sfx(&a, "fe_left_right", 0);
+    printf("fe_left_right: %u frames @ %u Hz\n", lr >= 0 ? a.sfx[lr].n : 0, lr >= 0 ? a.sfx[lr].rate : 0);
+    assert(lr >= 0 && a.sfx[lr].rate == 32000 && audio_sfx(&a, "fe_crickets", 0) >= 0);
     {
         Audio q = a;
         q.music = NULL; q.n_loops = 0;
