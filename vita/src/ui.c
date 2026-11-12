@@ -108,8 +108,9 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
         } else if (!strncmp(line, "text ", 5) && ui->n_item < UI_MAX_ITEMS) {
             UiItem *it = &ui->item[ui->n_item];
             int c[4];
-            if (sscanf(line + 5, "%23s %63s %47s %f %f %f %d %d %d %d %d %d", it->name, a, it->id, &it->x, &it->y, &it->scale,
-                       &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj) == 12) {
+            it->max_w = 0, it->max_lines = 1;
+            if (sscanf(line + 5, "%23s %63s %47s %f %f %f %d %d %d %d %d %d %f %d", it->name, a, it->id, &it->x, &it->y,
+                       &it->scale, &c[0], &c[1], &c[2], &c[3], &it->hj, &it->vj, &it->max_w, &it->max_lines) >= 12) {
                 for (int k = 0; k < 4; k++)
                     it->rgba[k] = (uint8_t)c[k];
                 it->font = find_font(ui, a);
@@ -131,13 +132,22 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
         } else if (!strncmp(line, "bg ", 3)) {
             sscanf(line + 3, "%f %f %f %f %f %f %f %f", &ui->bg[0], &ui->bg[1], &ui->bg[2], &ui->bg[3], &ui->bg[4],
                    &ui->bg[5], &ui->bg[6], &ui->bg[7]);
-        } else if (sscanf(line, "sign %47s %d", b, &i) == 2 && ui->n_sign < UI_MAX_SIGNS) {
-            snprintf(ui->sign[ui->n_sign].id, sizeof ui->sign[0].id, "%s", b);
-            ui->sign[ui->n_sign++].tex = i;
+        } else if (ui->n_sign < UI_MAX_SIGNS && !strncmp(line, "sign ", 5)) {
+            int c[4] = { 157, 128, 17, 255 }; /* PS2 default BackgroundColor (0x48db50) */
+            n = sscanf(line, "sign %47s %d %47s %d %d %d %d", b, &i, a, &c[0], &c[1], &c[2], &c[3]);
+            if (n >= 2) {
+                UiSign *sg = &ui->sign[ui->n_sign++];
+                snprintf(sg->id, sizeof sg->id, "%s", b);
+                snprintf(sg->desc, sizeof sg->desc, "%s", n >= 3 && strcmp(a, "-") ? a : "");
+                sg->tex = i;
+                for (int k = 0; k < 4; k++)
+                    sg->rgba[k] = (uint8_t)c[k];
+            }
         } else if (!strncmp(line, "camera ", 7) && ui->n_cam < 4) {
             UiCamera *cm = &ui->cam[ui->n_cam];
-            if (sscanf(line + 7, "%15s %f %f %f %f %f %f", cm->name, &cm->pos[0], &cm->pos[1], &cm->pos[2],
-                       &cm->fwd[0], &cm->fwd[1], &cm->fwd[2]) == 7)
+            cm->fov = 0;
+            if (sscanf(line + 7, "%15s %f %f %f %f %f %f %f", cm->name, &cm->pos[0], &cm->pos[1], &cm->pos[2],
+                       &cm->fwd[0], &cm->fwd[1], &cm->fwd[2], &cm->fov) >= 7)
                 ui->n_cam++;
         }
     }
@@ -213,11 +223,14 @@ static float text_width(const UiFont *fo, const char *s)
     float w = 0;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++)
         if (fo->g[*p].present)
-            w += fo->g[*p].w + fo->g[*p].xoff;
+            w += fo->g[*p].w + fo->g[*p].xoff + fo->g[*p].yoff;
     return w;
 }
 
-/* x, y in 640x480 UI space; glyph advance = width + xoff (the .cel's outline overlap) */
+/* x, y in 640x480 UI space. The .cel's two signed values are the glyph's left and right
+   overlaps (xoff, yoff), not an x/y offset: every cell is the full line height, so glyphs share
+   one top; the quad starts at pen + xoff and the pen advances w + xoff + yoff. Using yoff as a
+   vertical shift made letters jump (START's T up 5, its A down). */
 void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scale, const uint8_t rgba[4], int hj, int vj)
 {
     if (font < 0 || !*s)
@@ -230,8 +243,8 @@ void ui_text(const Ui *ui, int font, const char *s, float x, float y, float scal
         const UiGlyph *g = &fo->g[*p];
         if (!g->present)
             continue;
-        quad(ui->gl_tex[fo->tex], px, py + g->yoff * k, g->w * k, g->h * k, g->u0, g->v0, g->u1, g->v1, rgba);
-        px += (g->w + g->xoff) * k;
+        quad(ui->gl_tex[fo->tex], px + g->xoff * k, py, g->w * k, g->h * k, g->u0, g->v0, g->u1, g->v1, rgba);
+        px += (g->w + g->xoff + g->yoff) * k;
     }
 }
 
@@ -240,7 +253,42 @@ static void draw_item(const Ui *ui, const UiItem *it, float dx, float size, floa
 {
     uint8_t c[4] = { it->rgba[0], it->rgba[1], it->rgba[2], (uint8_t)(it->rgba[3] * alpha) };
     if (it->kind == 1) {
-        ui_text(ui, it->font, ui_str(ui, it->id), it->x + dx, it->y, it->scale, c, it->hj, it->vj);
+        const char *s = ui_str(ui, it->id);
+        if (it->max_w <= 0 || it->font < 0) {
+            ui_text(ui, it->font, s, it->x + dx, it->y, it->scale, c, it->hj, it->vj);
+            return;
+        }
+        /* UIMultiLineTextComponent: greedy word wrap at MaxLineWidth, at most MaxNumberOfLines,
+           one font line apart. shortcut: the PS2 wrapper (0x1d3960) is not decoded line by line */
+        const UiFont *fo = &ui->font[it->font];
+        char line[128];
+        float y = it->y;
+        for (int n = 0; *s && n < it->max_lines; n++) {
+            int len = 0, fit = 0;
+            while (s[len] && len < (int)sizeof line - 1) {
+                int end = len;
+                while (s[end] == ' ')
+                    end++;
+                while (s[end] && s[end] != ' ')
+                    end++;
+                if (end >= (int)sizeof line)
+                    break;
+                memcpy(line, s, end);
+                line[end] = 0;
+                if (fit && text_width(fo, line) * it->scale > it->max_w)
+                    break;
+                fit = len = end;
+            }
+            if (!fit)
+                break;
+            memcpy(line, s, fit);
+            line[fit] = 0;
+            ui_text(ui, it->font, line, it->x + dx, y, it->scale, c, it->hj, it->vj);
+            y += fo->line_h * it->scale;
+            s += fit;
+            while (*s == ' ')
+                s++;
+        }
         return;
     }
     /* a sized icon (the red circle) scales by SY both ways so it stays round on 16:9, like the signs */
@@ -292,7 +340,7 @@ void ui_draw_background(const Ui *ui, float p, float header_t)
         else if (!strncmp(n, "Footer", 6))     /* FooterLeft/Middle/Right: from the left */
             draw_item(ui, it, -640.0f * (1 - a), 0, 1);
         else if (!strcmp(n, "Red_Circle"))
-            draw_item(ui, it, 0, ui->tex_w[it->tex] * circle, 1);
+            draw_item(ui, it, 0, 64.0f * circle, 1); /* SetScale on its default 64-unit Width */
         else if (!strcmp(n, "Title"))
             draw_item(ui, it, tx - it->x, 0, p);
         else                                   /* button texts and labels fade in */
@@ -316,7 +364,9 @@ void ui_draw_signs(const Ui *ui, int selected, int dir, float t, float time)
         float x = SX5[k] + (dir ? (SX5[to] - SX5[k]) * t : 0);
         float sc = SC5[k] + (dir ? (SC5[to] - SC5[k]) * t : 0); /* brightness = scale */
         const UiSign *sg = &ui->sign[((selected + k - 2) % n + n) % n];
-        uint8_t c[4] = { (uint8_t)(255 * sc), (uint8_t)(255 * sc), (uint8_t)(255 * sc), 255 };
+        /* tint x brightness, per channel (PS2 0x249758..) */
+        uint8_t c[4] = { (uint8_t)(sg->rgba[0] * sc), (uint8_t)(sg->rgba[1] * sc), (uint8_t)(sg->rgba[2] * sc),
+                         sg->rgba[3] };
         float sz = ui->tex_w[sg->tex] * sc;
         quad(ui->gl_tex[sg->tex], (ui->sign_x + x) * SX - sz * SY / 2, ui->sign_y * SY - sz * SY / 2, sz * SY,
              sz * SY, 0, 0, 1, 1, c);

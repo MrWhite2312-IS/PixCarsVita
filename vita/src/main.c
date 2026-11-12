@@ -79,6 +79,8 @@ static int g_scene_loaded;
 static char g_scene_names[MAX_SCENES][64];
 static int g_n_scenes, g_scene_cur;
 static float g_far = SCENE_FAR; /* the front end's sky sits ~14000 ft from its cameras */
+#define DEFAULT_TAN_HALF_V 0.6248694f /* tan(32 deg) */
+static float g_tan_half_v = DEFAULT_TAN_HALF_V; /* scene projection: tan of half the vertical FOV */
 static Ui g_ui;
 static int g_have_ui;
 static Audio g_audio;
@@ -442,7 +444,7 @@ static void scene_camera(const float eye[3], float yaw, float pitch, float fwd_o
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     float znear = 1.0f;
-    float top = znear * tanf(32.0f * 3.14159265f / 180.0f);
+    float top = znear * g_tan_half_v;
     float right = top * (float)SCREEN_W / (float)SCREEN_H;
     glFrustum(-right, right, -top, top, znear, g_far);
 
@@ -747,9 +749,11 @@ static int ui_sound(const char *name, int loop)
     return id >= 0 ? audio_play(&g_audio, id, 1.0f, 1.0f, loop) : -1;
 }
 
-/* The game's front end (act\FrontEndUI, scene FE, the drive-in): the "Title Screen" page over
-   camera FE_Wel, then the "MainMenu" page (menu background + sign menu) over FE_Sel. Returns
-   when Story Mode is chosen; Quit Game exits. Without the exported UI it returns at once. */
+/* The game's front end (act\FrontEndUI, scene FE): the "Title Screen" page, then the "MainMenu"
+   page (menu background + sign menu), both over camera FE_Wel, the billboard (camera state 0 at
+   PS2 0x32a660, set by the title and the game-mode pages; FE_Sel, the drive-in, is state 1 for the
+   character and event pages). Returns when Story Mode is chosen; Quit Game exits. Without the
+   exported UI it returns at once. */
 static void run_front_end(void)
 {
     if (!g_have_ui)
@@ -766,7 +770,7 @@ static void run_front_end(void)
     ui_set_str(ui, "STR_DYN_MENU_ACCEPT_TEXT_BTN", "X"); /* shortcut: the PC showed its key name; Vita Cross */
     /* page 0 title, 1 main menu. bg_p: the menu background's intro (0..1); leaving: -1 back to
        the title, +1 into the story, played as the intro reversed (the game's outro state) */
-    int page = 0, sel = 0, dir = 0, leaving = 0, crickets = -1;
+    int page = 0, sel = 0, dir = 0, leaving = 0;
     float t = 0, bg_p = 0, header_t = 0, slide = 0;
     uint32_t prev = ~0u; /* ignore buttons still held from the previous screen */
     SceUInt64 last = sceKernelGetProcessTimeWide();
@@ -785,16 +789,11 @@ static void run_front_end(void)
                 ui_sound("fe_select_continue", 0);
                 ui_sound("fe_menu_in", 0);
                 page = 1, bg_p = 0, header_t = 0, leaving = 0;
-                /* the drive-in's crickets (fe.aud SoultreeSound1) sit 140 ft from FE_Sel, inside
-                   their 400 ft MinDistance: full volume on the menu, silent from FE_Wel */
-                crickets = ui_sound("fe_crickets", 1);
+                /* no crickets: the PS2 starts FE_Crickets only with the FE_Sel camera (state 1) */
             }
         } else if (leaving) {
             bg_p -= dt / ui->bg[0];
             if (bg_p <= 0) {
-                if (crickets >= 0)
-                    g_audio.voice[crickets].active = 0;
-                crickets = -1;
                 if (leaving > 0)
                     break;
                 page = 0;
@@ -832,13 +831,23 @@ static void run_front_end(void)
                 }
             }
         }
-        const UiCamera *cm = ui_camera(ui, page ? "FE_Sel" : "FE_Wel");
+        const UiCamera *cm = ui_camera(ui, "FE_Wel");
         glViewport(0, 0, SCREEN_W, SCREEN_H);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         if (cm && g_scene_loaded) {
             float fwd[3];
+            /* the camera's horizontal FOV is for 4:3; keep its vertical FOV, so 16:9 shows more
+               at the sides */
+            g_tan_half_v = cm->fov > 0 ? tanf(cm->fov * 0.5f * 3.14159265f / 180.0f) * 0.75f
+                                       : DEFAULT_TAN_HALF_V;
+            /* shortcut: fe.scn's backdrop only covers FE_Wel's view out to a half-width tangent of
+               0.349 (measured by rasterising fe.vcs from the camera); the full Hor+ 16:9 view
+               (0.378) shows black at the top left, so zoom in just enough to hide it */
+            const float max_tan_h = 0.345f;
+            if (g_tan_half_v * SCREEN_W / SCREEN_H > max_tan_h)
+                g_tan_half_v = max_tan_h * SCREEN_H / SCREEN_W;
             scene_camera(cm->pos, atan2f(cm->fwd[0], cm->fwd[2]), asinf(cm->fwd[1]), fwd);
             draw_scene(cm->pos, fwd);
         }
@@ -847,14 +856,20 @@ static void run_front_end(void)
             ui_draw_layer(ui, "TitleScreen");
         } else {
             ui_draw_background(ui, bg_p, header_t);
-            if (bg_p >= 1 || leaving)
+            if (bg_p >= 1 || leaving) {
+                /* MainMenu's MenuDescription layer: the selected item's description (PS2 0x2828a0) */
+                const char *desc = ui->n_sign ? ui->sign[sel].desc : "";
+                ui_set_str(ui, "STR_DYN_MENU_DESCRIPTION", *desc ? ui_str(ui, desc) : "");
+                ui_draw_layer(ui, "MenuDescription");
                 ui_draw_signs(ui, sel, dir, slide, t);
+            }
         }
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
         vglSwapBuffers(GL_FALSE);
     }
     g_far = SCENE_FAR;
+    g_tan_half_v = DEFAULT_TAN_HALF_V;
 }
 
 /* ------------------------------------------------------------------ main */
@@ -891,6 +906,11 @@ int main(void)
     plog("scenes listed: %d", g_n_scenes);
     g_have_ui = ui_load(&g_ui, DATA_ROOT "ui/", upload_texture) == 0;
     plog("ui: %s", g_have_ui ? "ok" : "missing");
+    if (g_have_ui) {
+        const UiCamera *wel = ui_camera(&g_ui, "FE_Wel");
+        if (!wel || wel->fov <= 0) /* cameras gained their FOV in ui.txt: an older copy lacks it */
+            plog("ui: ui.txt is out of date (no camera FOV): re-run tools/vitaui.py and copy ui/");
+    }
     run_front_end();
     /* Story Mode: Radiator Springs, driving (shortcut: CS_Intro and the activity chain come next) */
     for (int i = 0; i < g_n_scenes; i++)

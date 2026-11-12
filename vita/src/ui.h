@@ -35,16 +35,21 @@ typedef struct {
     float x, y, w, h, u0, u1, v0, v1, scale;
     uint8_t rgba[4];
     int hj, vj;
+    float max_w;               /* text: word-wrap width (0 = one line) */
+    int max_lines;
 } UiItem;
 
 typedef struct {
     char id[48];
+    char desc[48];             /* description string ID, "" if none */
     int tex;
+    uint8_t rgba[4];           /* tint (BackgroundColor), scaled by the slot's brightness */
 } UiSign;
 
 typedef struct {
     char name[16];
     float pos[3], fwd[3];
+    float fov; /* horizontal degrees on a 4:3 screen, 0 if unknown */
 } UiCamera;
 
 typedef struct {

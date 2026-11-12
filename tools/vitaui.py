@@ -10,12 +10,13 @@ Output in <out_dir>:
     str <ID> <text>
     layer <name>                                     followed by its components:
     icon <name> <tex> <x> <y> <w> <h> <u0> <u1> <v0> <v1> <r> <g> <b> <a> <hj> <vj>
-    text <name> <font> <ID> <x> <y> <scale> <r> <g> <b> <a> <hj> <vj>
+    text <name> <font> <ID> <x> <y> <scale> <r> <g> <b> <a> <hj> <vj> [<max width> <max lines>]
     bg <duration> <max_circle> <final_circle> <circle_ratio> <header_speed> <title_x1> <x2> <x3>
                                                      FrontEndMenuBackground [General] (+ code defaults)
     signs <x> <y> <font> <ID> <lx> <ly> <rgba> <selected rgba> <anim_s>   CarsUISignMenu + label
-    sign <ID> <tex>                                  one of its items
-    camera <name> <px> <py> <pz> <fx> <fy> <fz>      front-end animated camera (game space)
+    sign <ID> <tex> <desc ID or -> <r> <g> <b> <a>   one of its items, its tint
+    camera <name> <px> <py> <pz> <fx> <fy> <fz> <fov>  front-end animated camera (game space;
+                                                     fov: horizontal degrees on 4:3, 0 if none)
   Coordinates are the game's 640x480 UI space; hj/vj: 0 left/top, 1 centre, 2 right/bottom.
 
 .cel font: f32 ?, u32 0, u32 n_glyphs, then per glyph (unaligned):
@@ -37,13 +38,18 @@ DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
 BS = "\\"
 LANG = "spa"
 FONTS = ["24pt_franklincond_stroke", "22pt_antique_olive_stroke", "22pt_antique_olive_stroke_title"]
-LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MainMenuSigns"]
+LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MenuDescription", "MainMenuSigns"]
+# the main menu picks its description by the selected item's name (PS2 0x2828a0); the PC's
+# Quit Game has none
+SIGN_DESC = {"Story Mode": "STR_STORY_MODE_DESC", "Arcade Mode": "STR_ARCADE_MODE_DESC",
+             "Versus": "STR_VS_MODE_DESC", "Options": "STR_OPTIONS_DESC",
+             "Bonus Content": "STR_BONUS_CONTENT_DESC"}
 EXTRA_TEX = ["highlight_arrow"]  # drawn by the sign menu's HighlightArrows effect
 # The Spanish .bin files hold a few strings the shipped .loc name lists lack, so names and
 # strings drift apart. (first name index, string offset) pairs checked by hand against the
 # text; names past the last checked range are not exported.
 # shortcut: only the ranges the front end uses are verified; extend when more text is needed.
-ALIGN = {"CarsFrontEndUI": [(0, 0, 72)], "BXCarsFrontEndUI": [(0, 0, 46), (66, 3, 67)]}
+ALIGN = {"CarsFrontEndUI": [(0, 0, 72), (582, 5, 589)], "BXCarsFrontEndUI": [(0, 0, 46), (66, 3, 67)]}
 
 
 def strings(idx, table):
@@ -110,7 +116,10 @@ def cameras(idx):
             pos = [p + d for p, d in zip(pos, mot.sample_channel(ch, 0, "t"))]
         q = mot.sample_channel(m["rotation"][0], 0, "r") if m["rotation"] else (0, 0, 0, 1)
         f = qrot(q, (0, 0, 1))
-        out.append("camera %s %.3f %.3f %.3f %.5f %.5f %.5f" % (kv["name"], *pos, *f))
+        # the .mot's scalar track is the horizontal field of view in degrees (4:3 screen):
+        # FE_Wel 31.8 frames the billboard as the PC game shows it
+        fov = m["scalar"][0]["keys"][0][1] if m["scalar"] else 0
+        out.append("camera %s %.3f %.3f %.3f %.5f %.5f %.5f %.3f" % (kv["name"], *pos, *f, fov))
     return out
 
 
@@ -188,22 +197,28 @@ def main():
             hj = {"left": 0, "center": 1, "right": 2}[kv.get("horizontal_justification", "left").lower()]
             vj = {"top": 0, "center": 1, "bottom": 2}[kv.get("vertical_justification", "top").lower()]
             if typ == "UIIconComponent":
-                mt = material_tex(kv["material"])
+                # a component defined twice (the PC "BX_DONE" block re-adds [FooterMiddle] with
+                # footer_bottom_middle) keeps its first Material: the PC game shows a plain red footer
+                mt = material_tex(lyr[comp].get("material*", [kv["material"]])[0])
                 if not mt:
                     continue
                 t = tex(mt)
-                info = dxt.parse(texs[t][1])
+                # Width/Height default to 64, not the texture size; Scale multiplies them (PS2 0x2d0960)
                 sc = float(kv.get("scale", 1))
-                w = float(kv.get("width", info["width"] * sc))
-                h = float(kv.get("height", info["height"] * sc))
+                w = float(kv.get("width", 64)) * sc
+                h = float(kv.get("height", 64)) * sc
                 u0, u1, v0, v1 = (float(c) for c in kv.get("texcoords", "0,1,0,1").split(","))
                 r, g, b, al = color(kv.get("color"))
                 lines.append(f"icon {cname} {t} {x:g} {y:g} {w:g} {h:g} {u0:g} {u1:g} {v0:g} {v1:g} {r} {g} {b} {al} {hj} {vj}")
-            elif typ in ("CarsUIText", "CarsUIMultiStateText", "CarsUIMultiLineTextComponent"):
+            elif typ in ("CarsUIText", "CarsUIMultiStateText", "CarsUIMultiLineTextComponent",
+                         "UIMultiLineTextComponent"):
                 r, g, b, al = color(kv.get("color"))
                 used.add(kv["textid"])
+                wrap = ""
+                if typ.endswith("MultiLineTextComponent") and "maxlinewidth" in kv:
+                    wrap = f" {float(kv['maxlinewidth']):g} {int(kv.get('maxnumberoflines', 1))}"
                 lines.append(f"text {cname} {font(kv['font'])} {kv['textid']} {x:g} {y:g} {float(kv.get('scale', 1)):g} "
-                             f"{r} {g} {b} {al} {hj} {vj}")
+                             f"{r} {g} {b} {al} {hj} {vj}{wrap}")
             elif typ == "CarsUISignMenu":
                 lab = lyr[kv["component"]]
                 r, g, b, al = color(lab.get("color"))
@@ -215,7 +230,12 @@ def main():
                 for item in kv.get("menuitem*", []):
                     it = lyr[item]
                     used.add(it["textid"])
-                    lines.append(f"sign {it['textid']} {tex(it['iconname'])}")
+                    desc = SIGN_DESC.get(item, "-")
+                    used.add(desc)
+                    # sign tint: its BackgroundColor (PS2 0x24a5f4, default 157,128,17,255 at 0x48db50);
+                    # an item with a SubMenuItem is drawn grey 100 instead (0x24a990)
+                    sc = (100, 100, 100, 255) if "submenuitem" in it else color(it.get("backgroundcolor"), (157, 128, 17, 255))
+                    lines.append(f"sign {it['textid']} {tex(it['iconname'])} {desc} " + " ".join(map(str, sc)))
             else:
                 print(f"{layer}: skipped {comp} ({typ})")
     for e in EXTRA_TEX:
