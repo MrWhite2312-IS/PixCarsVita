@@ -22,10 +22,12 @@ add_executable(${PROJECT_NAME}
   src/vcm.c
   src/scene.c
   src/car.c
+  src/audio.c
 )
 
 target_link_libraries(${PROJECT_NAME}
   vitaGL
+  SceAudio_stub
   vitashark
   SceShaccCgExt
   mathneon

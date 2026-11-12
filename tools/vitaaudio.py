@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Export Cars (2006) audio for the Vita build (data stays the user's own copy).
+
+The game's .wav files are RIFF with format tag 2 but hold headerless IMA ADPCM:
+stereo music = one byte per frame (low nibble left, high nibble right), mono engine loops =
+two samples per byte (low nibble first). They are copied unchanged; the Vita decodes them.
+
+Writes into <out_dir>:
+  music/<name>.wav + music/playlist.txt        background tracks, in play order
+  engine/<file>.wav + engine/engine.txt         a character's engine profile:
+      gear <speed_lo> <speed_hi> <rpm_lo> <rpm_hi>     <char>EngineAudio.ini (MapSpeedToRPM)
+      loop <file> <base_rate> <rpm>:<vol>:<rate> ...  carengine.aud [<Char>LoopN]
+  (rate = Hz added to the loop's original sample rate, vol in percent)
+
+Usage:
+  vitaaudio.py <out_dir> [char=Mcq] [music=score_rs_day_1,score_rs_day_2,licensed1,...]
+"""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dxm
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("CARS_DATA", os.path.join(HERE, "..", "PC data", "Data"))
+BS = "\\"
+DEFAULT_MUSIC = ["score_rs_day_1", "score_rs_day_2"] + [f"licensed{i}" for i in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11)]
+
+
+def ini_sections(text):
+    return {s.lower(): {k: v[1] for k, v in kv.items()} for s, kv in dxm.parse_ini(text)}
+
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__); sys.exit(1)
+    out = a[0]
+    opts = dict(x.split("=", 1) for x in a[1:] if "=" in x)
+    char = opts.get("char", "Mcq")
+    music = opts["music"].split(",") if "music" in opts else DEFAULT_MUSIC
+    idx = dxm.AssetIndex(DATA)
+
+    os.makedirs(os.path.join(out, "music"), exist_ok=True)
+    names = []
+    for m in music:
+        k = BS.join(["data", "audio", "music", m.lower() + ".wav"])
+        if k not in idx.files:
+            print("missing", k)
+            continue
+        open(os.path.join(out, "music", m.lower() + ".wav"), "wb").write(idx.read(k))
+        names.append(m.lower())
+    open(os.path.join(out, "music", "playlist.txt"), "w").write("\n".join(names) + "\n")
+    print(f"music: {len(names)} tracks")
+
+    eng = os.path.join(out, "engine")
+    os.makedirs(eng, exist_ok=True)
+    secs = ini_sections(idx.read(BS.join(["data", "audio", "engine", "carengine.aud"])).decode("latin-1"))
+    prof = secs[char.lower()]
+    base_rate = int(float(prof.get("originalsamplerateps2", "32000")))
+    lines = []
+    gears = ini_sections(idx.read(BS.join(["data", "audio", "engine", char.lower() + "engineaudio.ini"])).decode("latin-1"))
+    for g in range(1, int(gears["general"]["numberofgears"]) + 1):
+        s = gears[f"gear{g}"]
+        lines.append(f"gear {s['rpmkey1']} {s['rpmkey2']} {s['minrpm']} {s['maxrpm']}")
+    for n in range(1, int(prof["numberofengineloops"]) + 1):
+        lp = secs[f"{char.lower()}loop{n}"]
+        src = BS.join(["data", "audio", lp["filename"].lower().replace("/", BS) + ".wav"])
+        fn = src.rsplit(BS, 1)[-1]
+        open(os.path.join(eng, fn), "wb").write(idx.read(src))
+        keys = " ".join(f"{lp[f'key{i}rpm']}:{lp[f'key{i}vol']}:{lp[f'key{i}rate']}"
+                        for i in range(1, int(lp["numberofkeys"]) + 1))
+        lines.append(f"loop {fn} {base_rate} {keys}")
+    open(os.path.join(eng, "engine.txt"), "w").write("\n".join(lines) + "\n")
+    print(f"engine: {char}, {int(prof['numberofengineloops'])} loops")
+
+
+if __name__ == "__main__":
+    main()

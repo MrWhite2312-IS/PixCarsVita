@@ -19,6 +19,18 @@ Sin filtros convierte todas las animaciones del personaje (McQueen tiene 337).
 Copia el contenido de `extracted/vita/mcq/` a `ux0:data/pixcars/mcq/`
 (VitaShell por FTP o USB): `model.vcm`, los `.vca`, `anims.txt` y `mcq.phy`.
 
+### Audio
+
+```bash
+python tools/vitaaudio.py extracted/vita/audio
+```
+
+Copia `extracted/vita/audio/` a `ux0:data/pixcars/audio/`: música del juego (música de
+Radiator Springs y canciones con licencia, `music/playlist.txt` fija el orden) y el motor de
+McQueen (los 6 bucles y el perfil `[Mcq]` de `carengine.aud`: volumen y tono por RPM; las
+RPM salen de la velocidad por los tramos de `mcqengineaudio.ini`). Los `.wav` del juego son
+IMA ADPCM sin cabeceras de bloque; la Vita los decodifica al vuelo.
+
 ## 3. Compilar
 
 Requiere [VitaSDK](https://vitasdk.org) con vitaGL instalado (`vdpm vitaGL`).
@@ -53,6 +65,7 @@ Genera `build/PixCarsVita.vpk`. Instálalo con VitaShell.
 | ○ | Freno de mano |
 | Cruceta ↓ | Recolocar el coche (derecho, en el sitio) |
 | △ | Cámara libre (stick izq. mover, stick der. mirar, L siguiente escenario) |
+| Cruceta → | Siguiente canción |
 
 La física (`src/car.c`) usa los parámetros del propio juego, `mcq.phy` (lo copia
 `vitaconv.py char`): peso, centro de gravedad, inercia, suspensión y radio por rueda,

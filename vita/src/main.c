@@ -15,6 +15,7 @@
  *            R / Cross   accelerate        L / Square    brake, then reverse
  *            left stick  steer             Circle        handbrake
  *            D-pad down  reset the car     Triangle      free camera
+ *            D-pad right next music track
  * free camera:
  *            left stick  move / strafe     right stick   look
  *            D-pad up/dn rise / descend    R (hold)      fast
@@ -30,7 +31,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include <psp2/audioout.h>
 #include <psp2/ctrl.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <vitaGL.h>
@@ -38,6 +41,7 @@
 #include "vcm.h"
 #include "scene.h"
 #include "car.h"
+#include "audio.h"
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -72,6 +76,30 @@ static VcsScene g_scene;
 static int g_scene_loaded;
 static char g_scene_names[MAX_SCENES][64];
 static int g_n_scenes, g_scene_cur;
+static Audio g_audio;
+static volatile int g_audio_run, g_audio_next;
+
+/* Mixer thread: one BGM port at 44.1 kHz stereo, fed 1024 frames at a time. */
+static int audio_thread(SceSize args, void *argp)
+{
+    (void)args;
+    (void)argp;
+    static int16_t buf[2 * 1024];
+    int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, 1024, AUDIO_RATE, SCE_AUDIO_OUT_MODE_STEREO);
+    if (port < 0)
+        return 0;
+    while (g_audio_run) {
+        if (g_audio_next) {
+            g_audio_next = 0;
+            audio_next_track(&g_audio);
+        }
+        audio_mix(&g_audio, buf, 1024);
+        sceAudioOutOutput(port, buf);
+    }
+    sceAudioOutReleasePort(port);
+    return 0;
+}
+
 static ColWorld g_col;
 static Car g_car;
 static CarParams g_params;     /* from ux0:data/pixcars/<char>/<char>.phy (McQueen's if absent) */
@@ -590,6 +618,14 @@ int main(void)
     plog("start");
     int have_char = load_character("mcq") == 0;
     plog("character: %s", have_char ? "ok" : "missing");
+    if (audio_init(&g_audio, DATA_ROOT "audio/") > 0) {
+        g_audio.engine_vol = 0; /* engine only while driving */
+        g_audio_run = 1;
+        SceUID th = sceKernelCreateThread("pixcars_audio", audio_thread, 0x10000100, 0x10000, 0, 0, NULL);
+        if (th >= 0)
+            sceKernelStartThread(th, 0, NULL);
+    }
+    plog("audio: %d tracks, %d engine loops", g_audio.n_tracks, g_audio.n_loops);
     list_scenes();
     plog("scenes listed: %d", g_n_scenes);
     if (!have_char && g_n_scenes)
@@ -681,6 +717,10 @@ int main(void)
                 car_spawn(&g_car, &g_params, &g_col, g_car.pos, yaw_now);
             }
             car_step(&g_car, &g_col, &in, dt);
+            g_audio.rpm = audio_speed_to_rpm(&g_audio, fabsf(car_speed(&g_car)) * 0.681818f);
+            g_audio.engine_vol = 0.8f;
+            if (pressed & SCE_CTRL_RIGHT)
+                g_audio_next = 1;
 
             /* parked with no input: play one of the game's idle animations, then wait again */
             int active = in.throttle > 0 || in.brake > 0 || in.steer != 0 || fabsf(car_speed(&g_car)) > 0.5f;
@@ -730,6 +770,8 @@ int main(void)
             pose_car(&g_car, pa, pw, pt, pn);
         }
 
+        if (mode != 1 || !driving)
+            g_audio.engine_vol = 0;
         if (mode == 1) {
             int lx = (int)pad.lx - 128, ly = (int)pad.ly - 128;
             int rx = (int)pad.rx - 128, ry = (int)pad.ry - 128;
@@ -835,6 +877,8 @@ int main(void)
         vglSwapBuffers(GL_FALSE);
     }
 
+    g_audio_run = 0;
+    sceKernelDelayThread(100000); /* let the mixer finish its last buffer */
     for (int i = 0; i < g_n_anims; i++)
         vca_free(&g_anims[i].anim);
     vcm_free(&g_model);
