@@ -95,6 +95,10 @@ float vca_duration(const VcaAnim *a);
 
 /* Compute pose_world/skin for time t (seconds, wrapped). anim may be NULL (bind pose). */
 void vcm_pose(VcmModel *m, const VcaAnim *a, float t);
+/* Weighted blend of n animations, each at its own time (rotations nlerped, translations
+ * averaged per node); nodes no animation tracks keep the bind pose. */
+void vcm_pose_blend(VcmModel *m, const VcaAnim *const *anims, const float *weights,
+                    const float *times, int n);
 /* Skin every batch into skinned_pos/skinned_nrm using the current pose. */
 void vcm_skin(VcmModel *m);
 /* UV offset that centres a CarsEye layer's iris on its eye node for the current pose.

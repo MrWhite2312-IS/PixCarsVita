@@ -76,6 +76,10 @@ static ColWorld g_col;
 static Car g_car;
 static CarParams g_params;     /* from ux0:data/pixcars/<char>/<char>.phy (McQueen's if absent) */
 static int g_idle[8], g_n_idle; /* <char>_beft_idle* animations, played when parked */
+/* lean pose strips (PS2 slots 7-12): base, back (accelerating), forward (braking), slow/fast */
+static const char *LEAN_NAMES[6] = { "_bef_lean_slow", "_bef_lean_fast", "_bef_lean_bck_slow",
+                                     "_bef_lean_bck_fast", "_bef_lean_fwd_slow", "_bef_lean_fwd_fast" };
+static int g_lean[6] = { -1, -1, -1, -1, -1, -1 };
 /* wheel nodes, in car.c order FL, FR, RL, RR: <Char>_wheel*_root (steer, suspension) and
    their child <Char>_wheel* (roll) */
 static const char *WHEEL_NAMES[4] = { "wheelfrontleft", "wheelfrontright", "wheelrearleft", "wheelrearright" };
@@ -202,9 +206,15 @@ static int load_character(const char *code)
                   g_model.n_batch, g_n_anims);
     if (g_n_anims)
         g_cur = 0;
-    for (int i = 0; i < g_n_anims && g_n_idle < 8; i++)
-        if (strstr(g_anims[i].name, "_beft_idle"))
+    for (int i = 0; i < g_n_anims; i++) {
+        for (int k = 0; k < 6; k++) {
+            size_t n = strlen(g_anims[i].name), l = strlen(LEAN_NAMES[k]);
+            if (n >= l && strcasecmp(g_anims[i].name + n - l, LEAN_NAMES[k]) == 0)
+                g_lean[k] = i;
+        }
+        if (strstr(g_anims[i].name, "_beft_idle") && g_n_idle < 8)
             g_idle[g_n_idle++] = i;
+    }
     return 0;
 }
 
@@ -480,7 +490,62 @@ static void set_camera(float yaw, float pitch, float dist, const float target[3]
 }
 
 /* Bind pose with the wheels steered, rolled and following the suspension. */
-static void pose_car(const Car *c, const VcaAnim *anim, float t)
+/* Body lean as the PS2 game does it (0x2b1860 / 0x2b1be0 / 0x37fc90): two signals in 0..1,
+   each smoothed twice by a 0.1 s filter. lat = (1 + shaped steering) / 2 picks the time in the
+   5-pose strips (left .. right); fa = (1 + throttle-brake axis) / 2 blends forward <- base ->
+   back; the slow and fast strips cross-fade between 44 and 146.67 ft/s (30 and 100 mph). */
+typedef struct { float lat, fa, lat_t, fa_t, axis; } Lean;
+
+static float lean_filter(float v, float target, float dt)
+{
+    return v + (target - v) * fminf(dt, 0.1f) / 0.1f;
+}
+
+static int lean_pose(Lean *ln, const CarInput *in, float speed, float dt,
+                     const VcaAnim **a, float *w, float *t)
+{
+    for (int k = 0; k < 6; k++)
+        if (g_lean[k] < 0)
+            return 0;
+    float x = in->steer, p = g_params.steer_power;
+    float shaped = (x < 0 ? -1.0f : 1.0f) * powf(fabsf(x), p);
+    float d = (in->throttle - in->brake) - ln->axis, r = g_params.x_rate * dt;
+    ln->axis += d > r ? r : (d < -r ? -r : d);
+    ln->lat_t = lean_filter(ln->lat_t, (1.0f + shaped) * 0.5f, dt);
+    ln->fa_t = lean_filter(ln->fa_t, (1.0f + ln->axis) * 0.5f, dt);
+    ln->lat = lean_filter(ln->lat, ln->lat_t, dt);
+    ln->fa = lean_filter(ln->fa, ln->fa_t, dt);
+    /* per speed set: pair (first weighted by f, second by 1 - f) */
+    float f;
+    int first[2], second[2]; /* [slow, fast] lean slot indices into g_lean */
+    if (ln->fa < 0.5f) {
+        f = 2.0f * ln->fa;
+        first[0] = 0; first[1] = 1; second[0] = 4; second[1] = 5;
+    } else {
+        f = 2.0f * (ln->fa - 0.5f);
+        first[0] = 2; first[1] = 3; second[0] = 0; second[1] = 1;
+    }
+    float sp = fabsf(speed), fast = fminf(1.0f, fmaxf(0.0f, (sp - 44.0f) / (146.67f - 44.0f)));
+    int n = 0;
+    for (int set = 0; set < 2; set++) {
+        float sw = set ? fast : 1.0f - fast;
+        if (sw <= 0)
+            continue;
+        const int ids[2] = { g_lean[first[set]], g_lean[second[set]] };
+        const float ws[2] = { f, 1.0f - f };
+        for (int j = 0; j < 2; j++) {
+            a[n] = &g_anims[ids[j]].anim;
+            w[n] = ws[j] * sw;
+            /* time = lat * duration, kept just inside the strip so it never wraps */
+            t[n] = fminf(ln->lat, 0.999f) * vca_duration(a[n]);
+            n++;
+        }
+    }
+    return n;
+}
+
+static void pose_car(const Car *c, const VcaAnim *const *anims, const float *weights,
+                     const float *times, int n_anims)
 {
     float saved[8][16];
     for (int w = 0; w < 4; w++) {
@@ -500,7 +565,7 @@ static void pose_car(const Car *c, const VcaAnim *anim, float t)
             vcm_mat_mul(Rx, saved[4 + w], L);
         }
     }
-    vcm_pose(&g_model, anim, t);
+    vcm_pose_blend(&g_model, anims, weights, times, n_anims);
     vcm_skin(&g_model);
     for (int w = 0; w < 4; w++) {
         if (g_wroot[w] >= 0)
@@ -567,6 +632,7 @@ int main(void)
     int paused = 0, lighting = 1, driving = have_char;
     float chase[3] = { 0, 0, 0 };
     int chase_init = 0, idle_anim = -1;
+    Lean lean = { 0.5f, 0.5f, 0.5f, 0.5f, 0.0f };
     float parked_t = 0, idle_t = 0;
     uint32_t prev_buttons = 0;
     SceUInt64 last = sceKernelGetProcessTimeWide();
@@ -653,7 +719,15 @@ int main(void)
             memcpy(cam, chase, sizeof cam);
             cyaw = atan2f(look[0], look[2]);
             cpitch = asinf(look[1] / (ll > 1e-3f ? ll : 1.0f));
-            pose_car(&g_car, ia, idle_t);
+            const VcaAnim *pa[4];
+            float pw[4], pt[4];
+            int pn;
+            if (ia) {
+                pa[0] = ia; pw[0] = 1; pt[0] = idle_t; pn = 1;
+            } else {
+                pn = lean_pose(&lean, &in, car_speed(&g_car), dt, pa, pw, pt);
+            }
+            pose_car(&g_car, pa, pw, pt, pn);
         }
 
         if (mode == 1) {

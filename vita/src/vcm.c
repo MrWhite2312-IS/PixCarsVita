@@ -240,11 +240,24 @@ static void quat_to_rows(const float q_in[4], float *m)
 
 void vcm_pose(VcmModel *m, const VcaAnim *a, float t)
 {
-    float local[256][16];
-    for (uint32_t i = 0; i < m->n_nodes; i++)
-        memcpy(local[i], m->nodes[i].local, 64);
+    float w = 1.0f;
+    vcm_pose_blend(m, &a, &w, &t, a ? 1 : 0);
+}
 
-    if (a && a->n_frames) {
+void vcm_pose_blend(VcmModel *m, const VcaAnim *const *anims, const float *weights,
+                    const float *times, int n)
+{
+    float local[256][16];
+    float qs[256][4], ps[256][3], wq[256], wp[256];
+    for (uint32_t i = 0; i < m->n_nodes; i++) {
+        memcpy(local[i], m->nodes[i].local, 64);
+        wq[i] = wp[i] = 0;
+    }
+    for (int ai = 0; ai < n; ai++) {
+        const VcaAnim *a = anims[ai];
+        float wgt = weights[ai], t = times[ai];
+        if (!a || !a->n_frames || wgt <= 0)
+            continue;
         float dur = vca_duration(a);
         if (dur > 0) {
             t = fmodf(t, dur);
@@ -263,22 +276,35 @@ void vcm_pose(VcmModel *m, const VcaAnim *a, float t)
         if (k > 1) k = 1;
         for (uint32_t i = 0; i < a->n_tracks; i++) {
             const VcaTrack *tr = &a->tracks[i];
-            if (tr->node < 0)
+            int nd = tr->node;
+            if (nd < 0)
                 continue;
-            float *L = local[tr->node];
             if (tr->rot) {
                 const float *q0 = tr->rot + f0 * 4, *q1 = tr->rot + f1 * 4;
                 float q[4];
                 for (int c = 0; c < 4; c++)
                     q[c] = q0[c] + (q1[c] - q0[c]) * k; /* nlerp; hemisphere fixed offline */
-                quat_to_rows(q, L); /* absolute local rotation */
+                if (wq[nd] > 0 && q[0] * qs[nd][0] + q[1] * qs[nd][1] + q[2] * qs[nd][2] + q[3] * qs[nd][3] < 0)
+                    for (int c = 0; c < 4; c++)
+                        q[c] = -q[c];
+                for (int c = 0; c < 4; c++)
+                    qs[nd][c] = (wq[nd] > 0 ? qs[nd][c] : 0) + q[c] * wgt;
+                wq[nd] += wgt;
             }
             if (tr->trans) {
                 const float *p0 = tr->trans + f0 * 3, *p1 = tr->trans + f1 * 3;
                 for (int c = 0; c < 3; c++)
-                    L[12 + c] = p0[c] + (p1[c] - p0[c]) * k;
+                    ps[nd][c] = (wp[nd] > 0 ? ps[nd][c] : 0) + (p0[c] + (p1[c] - p0[c]) * k) * wgt;
+                wp[nd] += wgt;
             }
         }
+    }
+    for (uint32_t i = 0; i < m->n_nodes; i++) {
+        if (wq[i] > 0)
+            quat_to_rows(qs[i], local[i]); /* absolute local rotation (normalised inside) */
+        if (wp[i] > 0)
+            for (int c = 0; c < 3; c++)
+                local[i][12 + c] = ps[i][c] / wp[i];
     }
     /* nodes are stored parents-first by the exporter? not guaranteed: resolve by recursion */
     uint8_t done[256] = { 0 };

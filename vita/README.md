@@ -59,6 +59,9 @@ La física (`src/car.c`) usa los parámetros del propio juego, `mcq.phy` (lo cop
 curvas de fuerza de neumático (fórmula del ELF de PS2), curva HP/RPM, marchas y cambios
 automáticos, frenos, aerodinámica, curva de dirección por velocidad y cámara. Parado
 5 s, McQueen reproduce sus animaciones `beft_idle` originales.
+Al conducir, la carrocería se inclina como en el juego: mezcla las animaciones
+`bef_lean_*` (lateral según el volante; adelante/atrás según acelerador y freno; juego
+lento o rápido entre 30 y 100 mph), con la lógica descifrada del ELF de PS2.
 
 Si la pantalla se queda roja, no encuentra `ux0:data/pixcars/mcq/model.vcm`.
 
