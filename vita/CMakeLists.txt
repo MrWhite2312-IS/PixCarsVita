@@ -24,6 +24,8 @@ add_executable(${PROJECT_NAME}
   src/car.c
   src/light.c
   src/camera.c
+  src/cutscene.c
+  src/race.c
   src/audio.c
   src/movie.c
   src/ui.c

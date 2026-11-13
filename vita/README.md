@@ -59,6 +59,30 @@ Animaciones (entrada del fondo, franja de cuadros, carrusel de carteles) y sonid
 (`sfx/ui_fe.aud`, grillos del autocine) salen del juego: tras actualizar, vuelve a ejecutar
 `vitaaudio.py` y `vitaui.py` y copia `audio/` y `ui/` de nuevo.
 
+### Cinemáticas del modo historia
+
+Como en el juego de PS2 (0x211cb0), una partida nueva empieza por la actividad
+`RR_1_1\CS_1_1A` y sigue cada `NextActivity`: CS_1_1A → CS_1_1A2 → CS_1_1C → la carrera
+RR_1_1 (el sueño de McQueen) → CS_1_1Z, y luego se conduce libre por Radiator Springs. Son cinemáticas en el motor: los personajes animados en sus posiciones del `.toy`,
+cámaras animadas, la voz en español, subtítulos con las capas `Letterbox` y `Subtitles` del
+juego y fundidos. ✕ o START saltan cada una.
+
+```bash
+for n in cs_1_1a cs_1_1a2 cs_1_1c cs_1_1z; do python tools/vitacutscene.py rr_1_1/$n extracted/vita/act/$n; done
+python tools/vitarace.py rr_1_1/rr_1_1 extracted/vita/act/rr_1_1
+for c in fle ram hud sal gui lui mat; do python tools/vitaconv.py char $c extracted/vita/$c zzz_no_anims; done
+python tools/vitaui.py extracted/vita/ui
+```
+
+Copia `extracted/vita/act/` a `ux0:data/pixcars/act/`, la carpeta de cada personaje
+(`model.vcm`) a `ux0:data/pixcars/<código>/` y `ui/` de nuevo. Aún no se dibujan las
+partículas (humo de los escapes) ni las sombras de los personajes.
+
+La carrera: cuenta atrás de 3 s, los rivales con su `.phy` y la IA siguiendo la línea de carrera
+del juego, vueltas y posición arriba a la izquierda; al cruzar la meta en la última vuelta, CS_1_1Z.
+Aún sin choques entre coches, las ruedas de los rivales no giran y el marcador es texto simple,
+no las capas `RacingOverlays`/`Countdown` del juego.
+
 ## 3. Compilar
 
 Requiere [VitaSDK](https://vitasdk.org) con vitaGL instalado (`vdpm vitaGL`).
@@ -157,6 +181,14 @@ Física del coche (lectura del `.phy`, plano, aceleración y marchas, giro, fren
 ```bash
 gcc -O2 -std=c99 -Ivita/src vita/src/car.c vita/src/scene.c vita/src/vcm.c vita/tests/car_test.c -lm -o car_test
 ./car_test extracted/vita/mcq/mcq.phy extracted/vita/scene/rs.vcs
+```
+
+Carrera (cinco coches con la IA en su casilla de salida en el escenario real; todos deben terminar
+las vueltas con tiempos parecidos a los del `.rpt`; el último número opcional traza a un corredor):
+
+```bash
+gcc -O2 -std=c99 -Ivita/src vita/src/race.c vita/src/car.c vita/src/scene.c vita/src/vcm.c vita/tests/race_test.c -lm -o race_test
+./race_test extracted/vita/act/rr_1_1/race.txt extracted/vita/scene/rs.vcs extracted/vita
 ```
 
 Iluminación (lectura del `.lit`, las tres luces por objeto, sombreado):

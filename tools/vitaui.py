@@ -40,9 +40,9 @@ LANG = "spa"
 FONTS = ["24pt_franklincond_stroke", "22pt_antique_olive_stroke", "22pt_antique_olive_stroke_title",
          "48pt_bullet_stroke"]  # the last: HudSpeedometerFont
 LAYERS = ["TitleScreen", "FrontEndMenuBackground", "MenuDescription", "MainMenuSigns",
-          "SpeedometerOverlay", "ExploreMap"]
+          "SpeedometerOverlay", "ExploreMap", "Letterbox", "Subtitles"]
 # in-game HUD layers take their style:: names from carsingame.sty, the rest from carsfrontendui.sty
-INGAME_LAYERS = {"SpeedometerOverlay", "ExploreMap"}
+INGAME_LAYERS = {"SpeedometerOverlay", "ExploreMap", "Letterbox", "Subtitles"}
 # the main menu picks its description by the selected item's name (PS2 0x2828a0); the PC's
 # Quit Game has none
 SIGN_DESC = {"Story Mode": "STR_STORY_MODE_DESC", "Arcade Mode": "STR_ARCADE_MODE_DESC",

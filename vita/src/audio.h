@@ -65,6 +65,14 @@ typedef struct {
     int n_sfx;
     Voice voice[AUDIO_MAX_VOICES];
     float sfx_vol;
+    /* a second stream for dialogue soundtracks (cutscenes): stereo IMA like the music, opened
+       by the mixer thread on request */
+    FILE *speech;
+    uint32_t speech_left;
+    ImaState sl, sr;
+    float speech_vol;
+    char speech_req[256];
+    volatile int speech_cmd;   /* 1 open speech_req, 2 stop; the mixer clears it */
 } Audio;
 
 int16_t ima_step(ImaState *s, int nibble);
@@ -77,6 +85,10 @@ int audio_sfx(const Audio *a, const char *name, int nth);
 /* Start an effect on a free voice; returns the voice (adjust vol/pitch, clear active to stop). */
 int audio_play(Audio *a, int sfx, float vol, float pitch, int loop);
 void audio_next_track(Audio *a);
+/* Play a stereo IMA .wav (full path) on the dialogue stream, replacing any; NULL stops it. */
+void audio_speech(Audio *a, const char *path);
+/* 1 while the dialogue stream still has data */
+int audio_speech_playing(const Audio *a);
 /* Engine RPM from road speed in mph, through the profile's gear ranges (MapSpeedToRPM). */
 float audio_speed_to_rpm(const Audio *a, float mph);
 /* Mix n stereo frames (interleaved L, R) at AUDIO_RATE. */

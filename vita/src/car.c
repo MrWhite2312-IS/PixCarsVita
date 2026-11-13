@@ -125,6 +125,12 @@ int col_build(ColWorld *w, const VcsScene *s)
         const VcsInstance *in = &s->inst[i];
         const float *M = in->world;
         const VcsMesh *m = &s->mesh[in->mesh];
+        /* shortcut: small placed props (signs, drive-in speakers, mailboxes: radius under 12 ft)
+           are not solid; the RR_1_1 race line runs through the speakers, so the game cannot
+           collide with them. Streamed terrain (identity matrix) always collides. Replace with
+           the game's own collision flags once decoded. */
+        if (in->radius < 12.0f && (M[12] != 0 || M[13] != 0 || M[14] != 0))
+            continue;
         for (uint32_t b = 0; b < m->n_batch; b++) {
             const VcsBatch *bt = &m->batch[b];
             const VcmMaterial *mat = &s->mat[bt->material];

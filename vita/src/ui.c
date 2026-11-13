@@ -91,7 +91,7 @@ int ui_load(Ui *ui, const char *dir, unsigned (*upload)(const VcmTexture *t))
             font->line_h = n;
         } else if (sscanf(line, "str %63s %n", a, &n) == 1 && ui->n_str < UI_MAX_STRS) {
             ui_set_str(ui, a, line + n);
-        } else if (sscanf(line, "layer %31s", a) == 1 && ui->n_layers < 8) {
+        } else if (sscanf(line, "layer %31s", a) == 1 && ui->n_layers < 16) {
             layer = ui->n_layers;
             snprintf(ui->layers[ui->n_layers++], 32, "%s", a);
         } else if (!strncmp(line, "icon ", 5) && ui->n_item < UI_MAX_ITEMS) {
@@ -299,12 +299,17 @@ static void draw_item(const Ui *ui, const UiItem *it, float dx, float size, floa
     quad(ui->gl_tex[it->tex], x, y, w, h, it->u0, it->v0, it->u1, it->v1, c);
 }
 
-void ui_draw_layer(const Ui *ui, const char *layer)
+void ui_draw_layer_alpha(const Ui *ui, const char *layer, float alpha)
 {
     int l = find_layer((Ui *)ui, layer);
     for (int i = 0; i < ui->n_item; i++)
         if (l >= 0 && ui->item[i].layer == l)
-            draw_item(ui, &ui->item[i], 0, 0, 1);
+            draw_item(ui, &ui->item[i], 0, 0, alpha);
+}
+
+void ui_draw_layer(const Ui *ui, const char *layer)
+{
+    ui_draw_layer_alpha(ui, layer, 1);
 }
 
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }

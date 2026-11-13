@@ -87,6 +87,47 @@ void audio_next_track(Audio *a)
     open_track(a);
 }
 
+void audio_speech(Audio *a, const char *path)
+{
+    if (path) {
+        snprintf(a->speech_req, sizeof a->speech_req, "%s", path);
+        a->speech_cmd = 1;
+    } else {
+        a->speech_cmd = 2;
+    }
+}
+
+int audio_speech_playing(const Audio *a)
+{
+    return a->speech_cmd == 1 || (a->speech && a->speech_left);
+}
+
+/* mixer thread: act on audio_speech's request */
+static void speech_update(Audio *a)
+{
+    int cmd = a->speech_cmd;
+    if (!cmd)
+        return;
+    if (a->speech)
+        fclose(a->speech);
+    a->speech = NULL;
+    a->speech_left = 0;
+    if (cmd == 1) {
+        uint32_t rate;
+        a->speech = fopen(a->speech_req, "rb");
+        if (a->speech) {
+            a->speech_left = wav_data(a->speech, &rate, NULL);
+            if (!a->speech_left) {
+                fclose(a->speech);
+                a->speech = NULL;
+            }
+        }
+        memset(&a->sl, 0, sizeof a->sl);
+        memset(&a->sr, 0, sizeof a->sr);
+    }
+    a->speech_cmd = 0;
+}
+
 /* Decode a whole mono IMA .wav (low nibble first) into 16-bit samples. */
 static int load_ima_mono(const char *path, int16_t **pcm, uint32_t *n, uint32_t *rate)
 {
@@ -163,6 +204,7 @@ int audio_init(Audio *a, const char *root)
     memset(a, 0, sizeof *a);
     snprintf(a->dir, sizeof a->dir, "%s", root);
     a->music_vol = 0.55f;
+    a->speech_vol = 1.0f;
     a->engine_vol = 0.8f;
     a->sfx_vol = 0.9f;
     int parts = 0;
@@ -246,6 +288,8 @@ int audio_play(Audio *a, int sfx, float vol, float pitch, int loop)
 
 void audio_free(Audio *a)
 {
+    if (a->speech)
+        fclose(a->speech);
     if (a->music)
         fclose(a->music);
     for (int i = 0; i < a->n_loops; i++)
@@ -307,8 +351,9 @@ void audio_mix(Audio *a, int16_t *out, int frames)
         float hz = a->loop[i].base_rate + rate;
         steps[i] = (hz > 0 ? hz : 0) / (float)AUDIO_RATE;
     }
-    uint8_t buf[2048];
+    uint8_t buf[2048], sbuf[2048];
     int done = 0;
+    speech_update(a);
     while (done < frames) {
         int n = frames - done;
         if (n > (int)sizeof buf)
@@ -320,11 +365,23 @@ void audio_mix(Audio *a, int16_t *out, int frames)
             got = (int)fread(buf, 1, (size_t)want, a->music);
             a->music_left -= (uint32_t)got;
         }
+        int sgot = 0;
+        if (a->speech && a->speech_left) {
+            int want = n < (int)a->speech_left ? n : (int)a->speech_left;
+            sgot = (int)fread(sbuf, 1, (size_t)want, a->speech);
+            a->speech_left -= (uint32_t)sgot;
+            if (sgot < want)
+                a->speech_left = 0;
+        }
         for (int i = 0; i < n; i++) {
             float l = 0, r = 0;
             if (i < got) {
                 l = ima_step(&a->ml, buf[i] & 15) * a->music_vol;
                 r = ima_step(&a->mr, buf[i] >> 4) * a->music_vol;
+            }
+            if (i < sgot) {
+                l += ima_step(&a->sl, sbuf[i] & 15) * a->speech_vol;
+                r += ima_step(&a->sr, sbuf[i] >> 4) * a->speech_vol;
             }
             float e = 0;
             for (int k = 0; k < a->n_loops; k++) {

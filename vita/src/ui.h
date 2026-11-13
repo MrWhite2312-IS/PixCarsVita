@@ -61,9 +61,9 @@ typedef struct {
     int n_font;
     UiItem item[UI_MAX_ITEMS];
     int n_item;
-    char layers[8][32];
+    char layers[16][32];
     int n_layers;
-    struct { char id[48]; char text[128]; } str[UI_MAX_STRS];
+    struct { char id[48]; char text[256]; } str[UI_MAX_STRS];
     int n_str;
     /* the main menu's CarsUISignMenu */
     float sign_x, sign_y, label_x, label_y;
@@ -92,6 +92,8 @@ int ui_tex(const Ui *ui, const char *name);
 /* 2D drawing: call ui_begin once per frame before the draw calls (sets an ortho view). */
 void ui_begin(void);
 void ui_draw_layer(const Ui *ui, const char *layer);
+/* the same with every component's alpha scaled (a layer's fade) */
+void ui_draw_layer_alpha(const Ui *ui, const char *layer, float alpha);
 /* The menu background with its intro animation as the PS2 game plays it (0x27b210):
    p 0..1 over bg[0] seconds (reverse it for the outro); header_t: seconds since the intro
    ended, scrolls the checkered header strip. */
