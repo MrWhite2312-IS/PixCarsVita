@@ -1,6 +1,6 @@
 /* Host test for the cutscene timeline:
  *   gcc -O2 -std=c99 -Ivita/src vita/src/cutscene.c vita/tests/cutscene_test.c -lm -o cutscene_test
- *   ./cutscene_test extracted/vita/act/cs_intro/
+ *   ./cutscene_test extracted/vita/act/cs_intro/ [more cutscene folders: every motion must bind]
  */
 #include <math.h>
 #include <stdio.h>
@@ -44,6 +44,23 @@ int main(int argc, char **argv)
     CHECK(cutscene_black(&c, 0) > 0.99f && cutscene_black(&c, 2.0f) < 0.01f, "fade in");
     CHECK(cutscene_black(&c, 41.0f) > 0.99f, "fade out");
     cutscene_free(&c);
+
+    /* further cutscene folders: every anim line must find its toy (names match without case) */
+    for (int i = 2; i < argc; i++) {
+        char path[512], line[512];
+        snprintf(path, sizeof path, "%scutscene.txt", argv[i]);
+        FILE *f = fopen(path, "r");
+        int lines = 0;
+        while (f && fgets(line, sizeof line, f))
+            lines += !strncmp(line, "anim ", 5);
+        if (f)
+            fclose(f);
+        Cutscene d;
+        CHECK(cutscene_load(&d, argv[i]) == 0, "load %s", argv[i]);
+        printf("%s: %d of %d motions bound to toys\n", argv[i], d.n_anims, lines);
+        CHECK(d.n_anims == lines, "%s: motions without their toy", argv[i]);
+        cutscene_free(&d);
+    }
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails != 0;
 }

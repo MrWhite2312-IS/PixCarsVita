@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* the Subtitles layer fades its text in and out over TransitionTime (ui\subtitles.lyr) */
 #define CAPTION_FADE 0.5f
@@ -48,10 +49,12 @@ static int find_track(Cutscene *c, const char *dir, const char *name)
     return c->n_tracks++;
 }
 
+/* toy names are matched without case: the .toy says FLE_1_1A2 / Ram_1_1a where the .as actions
+   name FLE_1_1a2 / RAM_1_1a */
 static int find_toy(const Cutscene *c, const char *name)
 {
     for (int i = 0; i < c->n_toys; i++)
-        if (!strcmp(c->toy[i].name, name))
+        if (!strcasecmp(c->toy[i].name, name))
             return i;
     return -1;
 }
