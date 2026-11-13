@@ -22,7 +22,7 @@ typedef struct {
 
 typedef struct {
     char code[16];                     /* character (model folder, .phy) */
-    int order;                         /* StartLineOrder: the grid slot */
+    int order;                         /* grid slot: StartLineOrder - 1 */
     float delay;                       /* StartDelay (s after the go) */
     float pace_pct, min_pct, max_pct;  /* PacePercentModifier, Min/Max (percent) */
     float max_offset, offset_time;     /* MaxOffsetDist (ft), TimeToSwitchOffset (s) */

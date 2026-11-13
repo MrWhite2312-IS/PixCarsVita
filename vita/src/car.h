@@ -106,6 +106,8 @@ typedef struct {
     /* controls, in the PS2 vehicle's terms (offsets of CarsVehiclePhysics) */
     float x, x_prev, y, xf, yf;/* stick +1628/1632/1636, filtered +1640/1644 */
     int digital;               /* steering from the d-pad (+1015 bit 3) */
+    int locked;                /* controls off: +1015 bit 2 clear (0x37fc90); the race clears it
+                                  for the countdown (0x22aae0) and sets it at the go (0x22ac10) */
     float gas_in, brake_in, ebrake_in; /* +1216, +1212, +1220 */
     float steer_cmd, rear_cmd; /* +1256 / +1260: fractions of the front / rear max steer angle */
     float gas, brake;          /* engine throttle +1240, brake level +1248 (ramp +1252) */

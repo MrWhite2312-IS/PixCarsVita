@@ -1326,10 +1326,18 @@ static int run_cutscene(const char *name, char *next, size_t next_size)
 /* A race activity (act/<name>/race.txt): the player (racer slot 0) drives g_car, the others are
    AI cars with their own .phy and model. shortcut: no car-to-car collisions yet, opponents keep
    their bind pose (wheels do not turn), no countdown sound. */
-#define COUNTDOWN 3.0f
 static Race g_race;
 static int g_racing;
-static float g_race_t;                  /* seconds since the go, negative during the countdown */
+/* the race's track manager (0x22a510): state 2 counting down (+0x34), 1 racing (clock +0x30) */
+static int g_race_state;
+static float g_count_t, g_race_t;
+/* the Countdown overlay (0x3ab120): its own timer (+0xbc) and the value last shown (+0xc0) */
+static float g_hud_t, g_hud_v;
+static int g_hud_on;
+/* per AI: StartDelay left (+0x3dc), counting while the racer's +0x48 bit 0x10 is set (0x388d90) */
+static float g_delay[RACE_MAX_RACERS];
+static int g_delay_on[RACE_MAX_RACERS];
+static void race_hud_update(float dt);
 static RaceState g_rs[RACE_MAX_RACERS];
 static Car g_opp[RACE_MAX_RACERS];      /* slot 0 unused: the player is g_car */
 static CarParams g_opp_par[RACE_MAX_RACERS];
@@ -1379,10 +1387,34 @@ static int race_start(const char *name)
         }
         car_spawn(c, k ? &g_opp_par[k] : &g_params, &g_col, pos, yaw);
         race_track(&g_race, &g_rs[k], c->pos);
+        /* 0x3315c0: StartDelay copied to the countdown copy +0x3dc */
+        g_delay[k] = g_race.racer[k].delay;
+        g_delay_on[k] = 0;
+        /* 0x22aae0 with HasPaceLap F: every car's controls off for the countdown */
+        c->locked = 1;
     }
-    g_race_t = -COUNTDOWN;
+    /* 0x22aae0: state 2, 3 s, and message (5,1) with 3.0 starts the Countdown overlay
+       (0x3be8e0 -> 0x3ab4a0: timer = 3, last value 0) */
+    g_race_state = 2;
+    g_count_t = 3.0f;
+    g_race_t = 0;
+    g_hud_t = 3.0f;
+    g_hud_v = 0;
+    g_hud_on = 1;
     g_racing = 1;
     return 0;
+}
+
+/* 0x22ac10, the go: controls on (+1015 bit 2) and StartDelay pending (+0x48 bit 0x10) for every
+   racer, then racing */
+static void race_go(void)
+{
+    g_car.locked = 0;
+    for (int k = 1; k < g_race.nr; k++) {
+        g_opp[k].locked = 0;
+        g_delay_on[k] = 1;
+    }
+    g_race_state = 1;
 }
 
 /* 1-based place: finished racers by finish time, ahead of the rest by race distance. */
@@ -1408,21 +1440,31 @@ static void race_finish_check(int k)
     }
 }
 
-/* One frame before the player's car_step: the countdown holds the player (in), the AI cars
-   drive, laps are tracked. Returns 1 once the player has finished. */
+/* One frame before the player's car_step: the countdown (0x22a510), the AI cars, laps.
+   Returns 1 once the player has finished. */
 static int race_update(CarInput *in, float dt)
 {
-    g_race_t += dt;
-    if (g_race_t < 0) {
-        memset(in, 0, sizeof *in);
-        in->brake = 1;
+    (void)in; /* the player's controls are held by g_car.locked during the countdown */
+    race_hud_update(dt);
+    if (g_race_state == 2) {
+        if (g_count_t > 0)
+            g_count_t -= dt;
+        else
+            race_go();
+    } else {
+        g_race_t += dt;
     }
     for (int k = 1; k < g_race.nr; k++) {
         CarInput ai;
         race_ai(&g_race, &g_rs[k], k, race_place(k), &g_opp[k], dt, &ai);
-        if (g_race_t < g_race.racer[k].delay) { /* StartDelay counts from the go */
-            memset(&ai, 0, sizeof ai);
-            ai.brake = 1;
+        if (g_delay_on[k]) {
+            /* 0x388d90: while StartDelay runs the AI does not drive: its controls stay as the
+               countdown left them (zero) */
+            g_delay[k] -= dt;
+            if (g_delay[k] >= 0)
+                memset(&ai, 0, sizeof ai);
+            else
+                g_delay_on[k] = 0;
         }
         car_step(&g_opp[k], &g_col, &ai, dt);
         race_track(&g_race, &g_rs[k], g_opp[k].pos);
@@ -1450,22 +1492,48 @@ static void race_draw(int lighting)
     }
 }
 
-/* shortcut: plain text where RacingOverlays puts Lap and Position (top left) and Countdown its
-   number (centre), not the game's layers (racingoverlays/countdown.lyr not exported yet). */
+/* RacingOverlays (racingoverlays.lyr/.lyt): position top left, the number (HudPositionFont,
+   48pt_bullet_stroke = font 3) right-aligned at 57,25 and "/max" (HudStatsFont, font 0, BlueLight)
+   at +5,+2; the lap the same at 580,25 (top right). Countdown (countdown.lyt): CountdownFont at
+   320,88, then STR_GO "¡YA!". shortcut: drawn with ui_text, without the layers' transitions
+   (scale/fade), the countdown lens/ring/glow icons, Time/Lead/Best and the race map. */
 static void race_hud(void)
 {
-    static const uint8_t white[4] = { 255, 255, 255, 255 }, orange[4] = { 255, 150, 0, 255 };
+    static const uint8_t white[4] = { 255, 255, 255, 255 }, blue[4] = { 115, 154, 167, 255 };
     char s[32];
     int lap = g_rs[0].lap < 1 ? 1 : (g_rs[0].lap > g_race.laps ? g_race.laps : g_rs[0].lap);
-    snprintf(s, sizeof s, "VUELTA %d/%d", lap, g_race.laps);
-    ui_text(&g_ui, 0, s, 24, 20, 1, white, 0, 0);
-    snprintf(s, sizeof s, "%d/%d", race_place(0), g_race.nr);
-    ui_text(&g_ui, 0, s, 24, 46, 1.6f, white, 0, 0);
-    if (g_race_t < 0) {
-        snprintf(s, sizeof s, "%d", (int)ceilf(-g_race_t));
-        ui_text(&g_ui, 0, s, 320, 135, 3, orange, 1, 1);
-    } else if (g_race_t < 1) {
-        ui_text(&g_ui, 0, "\xa1YA!", 320, 135, 3, orange, 1, 1); /* Latin-1, as ui.txt */
+    snprintf(s, sizeof s, "%d", race_place(0));
+    ui_text(&g_ui, 3, s, 57, 25, 1, white, 2, 0);
+    snprintf(s, sizeof s, "/%d", g_race.nr);
+    ui_text(&g_ui, 0, s, 62, 27, 1, blue, 0, 0);
+    snprintf(s, sizeof s, "%d", lap);
+    ui_text(&g_ui, 3, s, 580, 25, 1, white, 2, 0);
+    snprintf(s, sizeof s, "/%d", g_race.laps);
+    ui_text(&g_ui, 0, s, 585, 27, 1, blue, 0, 0);
+    if (g_hud_on) {
+        /* 0x3ab120: the value last set (ceilf of its timer): a number while > 0, then STR_GO */
+        if (g_hud_v > 0) {
+            snprintf(s, sizeof s, "%.0f", g_hud_v);
+            ui_text(&g_ui, 3, s, 320, 88, 1, white, 1, 1);
+        } else {
+            ui_text(&g_ui, 3, "\xa1YA!", 320, 88, 1, white, 1, 1); /* STR_GO, Latin-1 as ui.txt */
+        }
+    }
+}
+
+/* the Countdown overlay's update (0x3ab120), once per frame with the HUD: shown while the timer
+   is above -1, then hidden; the timer drops by dt after each frame. shortcut: no sounds (UI
+   sounds 10 and 11 of 0x2a6b00, names not traced) and no lens/ring/glow icons (countdown.lyr not
+   exported). */
+static void race_hud_update(float dt)
+{
+    if (!g_hud_on)
+        return;
+    if (g_hud_t > -1.0f) {
+        g_hud_v = ceilf(g_hud_t);
+        g_hud_t -= dt;
+    } else {
+        g_hud_on = 0;
     }
 }
 
@@ -1967,10 +2035,12 @@ int main(void)
                     ui_draw_boost_meter(&g_ui, g_ui.boost_len[lv - 1], g_car.nox / cap);
                 /* SpeedometerOverlay: R while in reverse gear, else the speed */
                 ui_draw_speedometer(&g_ui, fabsf(car_speed(&g_car)), HUD_KPH, g_car.gear < 0);
-                /* ExploreMap: the compass turns with the view (heading = atan2(z, x)) */
-                ui_draw_compass(&g_ui, atan2f(cfwd[2], cfwd[0]));
+                /* ExploreMap (exploring only; a race has RaceMap): the compass turns with the view
+                   (heading = atan2(z, x)) */
                 if (g_racing)
                     race_hud();
+                else
+                    ui_draw_compass(&g_ui, atan2f(cfwd[2], cfwd[0]));
                 glColor4ub(255, 255, 255, 255);
                 glDisable(GL_BLEND);
                 glEnable(GL_DEPTH_TEST);

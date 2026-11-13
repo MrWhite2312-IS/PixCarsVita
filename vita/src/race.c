@@ -80,8 +80,12 @@ int race_load(Race *r, const char *path)
             RaceRacer *x = &r->racer[r->nr];
             int slot;
             if (sscanf(s, "%d %15s %d %f %f %f %f %f %f", &slot, x->code, &x->order, &x->delay, &x->pace_pct,
-                       &x->min_pct, &x->max_pct, &x->max_offset, &x->offset_time) == 9)
+                       &x->min_pct, &x->max_pct, &x->max_offset, &x->offset_time) == 9) {
+                /* StartLineOrder is 1-based: RR_1_1's orders 1..5 fill its one row of five
+                   (VehiclesPerRow 5) in the order CS_1_1C ends on, MCQ FLE SAL HUD RAM */
+                x->order -= 1;
                 r->nr++;
+            }
         } else if (!strcmp(w, "pace") && r->n_pace < RACE_MAX_RACERS) {
             int k;
             if (sscanf(s, "%d %f %f", &k, &r->pace_min[r->n_pace], &r->pace_max[r->n_pace]) == 3)

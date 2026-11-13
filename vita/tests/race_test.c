@@ -63,12 +63,44 @@ int main(int argc, char **argv)
         printf("  %s slot %d at %.0f %.0f %.0f progress %.0f%s\n", R.racer[k].code, R.racer[k].order, c[k].pos[0],
                c[k].pos[1], c[k].pos[2], s[k].progress, t ? "" : " (default .phy)");
     }
+    /* a field that fits in one row (RR_1_1: 5 per row) starts side by side, as CS_1_1C ends */
+    if (R.nr <= R.per_row)
+        for (int k = 1; k < R.nr; k++)
+            assert(fabsf(s[k].progress - s[0].progress) < 1.0f);
 
     const float dt = 1.0f / 60.0f;
     float last_lap[RACE_MAX_RACERS] = { 0 };
     int done = 0;
+    /* the countdown as the game runs it (0x22aae0, 0x22a510, 0x22ac10): controls off for 3 s,
+       then the go; each AI then waits its StartDelay with its controls untouched (0x388d90) */
+    float count_t = 3.0f, delay[RACE_MAX_RACERS], grid_pos[RACE_MAX_RACERS][3];
+    int racing = 0, delay_on[RACE_MAX_RACERS] = { 0 };
+    for (int k = 0; k < R.nr; k++) {
+        c[k].locked = 1;
+        delay[k] = R.racer[k].delay;
+        memcpy(grid_pos[k], c[k].pos, sizeof grid_pos[k]);
+    }
+    float go_t = -1;
     for (int f = 0; f < 60 * 60 * 6 && done < R.nr; f++) {
         float now = f * dt;
+        if (!racing) {
+            if (count_t > 0) {
+                count_t -= dt;
+            } else {
+                racing = 1;
+                go_t = now;
+                for (int k = 0; k < R.nr; k++) {
+                    /* held through the countdown (brake level and ramp full): stopped at the go,
+                       having only settled from the spawn height */
+                    float d[3] = { c[k].pos[0] - grid_pos[k][0], 0, c[k].pos[2] - grid_pos[k][2] };
+                    printf("  go at t=%.2f: %s settled %.2f ft, %.3f ft/s\n", now, R.racer[k].code,
+                           sqrtf(d[0] * d[0] + d[2] * d[2]), car_speed(&c[k]));
+                    assert(fabsf(car_speed(&c[k])) < 0.1f);
+                    c[k].locked = 0;
+                    delay_on[k] = 1;
+                }
+            }
+        }
         for (int k = 0; k < R.nr; k++) {
             if (s[k].finished)
                 continue;
@@ -77,8 +109,13 @@ int main(int argc, char **argv)
                 rank += j != k && race_distance(&R, &s[j]) > race_distance(&R, &s[k]);
             CarInput in;
             race_ai(&R, &s[k], k, rank, &c[k], dt, &in);
-            if (now < R.racer[k].delay)
-                in.throttle = 0, in.brake = 1;
+            if (delay_on[k]) {
+                delay[k] -= dt;
+                if (delay[k] >= 0)
+                    memset(&in, 0, sizeof in);
+                else
+                    delay_on[k] = 0;
+            }
             car_step(&c[k], &w, &in, dt);
             if (k == trace && f % 30 == 0)
                 printf("    %s t=%.1f pos %.0f %.1f %.0f v %.1f thr %.1f brk %.0f st %.2f gear %d gnd %d node %d\n",
@@ -96,7 +133,7 @@ int main(int argc, char **argv)
             }
             if (s[k].lap > R.laps) {
                 s[k].finished = 1;
-                s[k].finish_time = now;
+                s[k].finish_time = now - go_t; /* the race clock runs from the go (0x22a510) */
                 done++;
             }
         }

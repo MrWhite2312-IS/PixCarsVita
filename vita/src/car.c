@@ -125,10 +125,11 @@ int col_build(ColWorld *w, const VcsScene *s)
         const VcsInstance *in = &s->inst[i];
         const float *M = in->world;
         const VcsMesh *m = &s->mesh[in->mesh];
-        /* shortcut: small placed props (signs, drive-in speakers, mailboxes: radius under 12 ft)
-           are not solid; the RR_1_1 race line runs through the speakers, so the game cannot
-           collide with them. Streamed terrain (identity matrix) always collides. Replace with
-           the game's own collision flags once decoded. */
+        /* shortcut: small placed props (radius under 12 ft) are not solid. In rs these are exactly
+           the models with a scenes\rs\pco\<name>.pco (signs, drive-in speakers, mailboxes,
+           tumbleweed): 100 lb rigid bodies the game knocks over (the RR_1_1 race line runs
+           through the speakers). Here they stay put and cars pass through. Streamed terrain
+           (identity matrix) always collides. Upgrade: flag .pco models in vitascene.py. */
         if (in->radius < 12.0f && (M[12] != 0 || M[13] != 0 || M[14] != 0))
             continue;
         for (uint32_t b = 0; b < m->n_batch; b++) {
@@ -1080,6 +1081,18 @@ static void read_input(Car *c, const CarInput *in)
 static void controls(Car *c, float dt)
 {
     const CarParams *p = c->p;
+    if (c->locked) {
+        /* controls off (+1015 bit 2 clear, e.g. the race countdown): stick, pedals, filters and
+           steering zero, powerslide (+1013 b4) and NOX off, brake level and ramp (+1248, +1252)
+           full: the car is held */
+        c->x = c->y = c->xf = c->yf = 0;
+        c->gas_in = c->brake_in = 0; /* +1216, +1212 (the EBrake +1220 is left alone) */
+        c->gas = c->steer_cmd = 0;
+        c->ps = 0;
+        c->nox_on = 0;
+        c->brake = c->brake_acc = 1.0f;
+        return;
+    }
     float sp_mph = fabsf(c->fwd) * MPH, scale;
     if (c->digital) {
         float r = (c->x != 0 ? p->xdpad_on : p->xdpad_off) * dt;

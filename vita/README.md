@@ -78,10 +78,13 @@ Copia `extracted/vita/act/` a `ux0:data/pixcars/act/`, la carpeta de cada person
 (`model.vcm`) a `ux0:data/pixcars/<código>/` y `ui/` de nuevo. Aún no se dibujan las
 partículas (humo de los escapes) ni las sombras de los personajes.
 
-La carrera: cuenta atrás de 3 s, los rivales con su `.phy` y la IA siguiendo la línea de carrera
-del juego, vueltas y posición arriba a la izquierda; al cruzar la meta en la última vuelta, CS_1_1Z.
-Aún sin choques entre coches, las ruedas de los rivales no giran y el marcador es texto simple,
-no las capas `RacingOverlays`/`Countdown` del juego.
+La carrera: los cinco en una fila de salida (`StartLineOrder` 1–5, en el orden en que acaba
+CS_1_1C), cuenta atrás de 3 s, los rivales con su `.phy` y la IA siguiendo la línea de carrera del
+juego; posición arriba a la izquierda y vuelta arriba a la derecha con las posiciones, fuentes y
+colores de `RacingOverlays`; al cruzar la meta en la última vuelta, CS_1_1Z.
+Aún falta: los 91 objetos de la carrera de `rr_1_1.toy` (barreras `RB_V1*`, barriles, conos, pancartas
+y línea de meta), choques entre coches, ruedas de los rivales, transiciones e iconos del marcador,
+Tiempo/En cabeza/Mejor vuelta y el mapa de carrera.
 
 ## 3. Compilar
 
