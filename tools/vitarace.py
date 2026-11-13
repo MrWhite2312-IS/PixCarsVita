@@ -8,7 +8,8 @@ game's parsing (defaults and unit conversions from the PS2 ELF). One item per li
 game space (feet):
   act <Key> <value>                             [Activity] keys of the .aty
   grid <per_row> <slot_width> <row_sep> <start_node> <finish_node>   [RaceBoundary]
-  bnode <i> px py pz lx ly lz rx ry rz <dist_to_finish> <n_next> next... <n_prev> prev...
+  bnode <i> px py pz lx ly lz rx ry rz <dist_to_finish> <zone_id> <branch_id> <no_reset> <progress>
+        <n_next> next... <n_prev> prev...       (ZoneID default 1; NoReset/ProgressNode: key present)
   path <p> <num_nodes> <num_segments> <linear> <start_node> <times_computed>
                                                 [Path<p>] (RacePath loader 0x38c990)
   seg <p> <i> <start> <finish> <section_id> <has_time> <segment_time> <branch_count>
@@ -96,9 +97,10 @@ def main():
         n = kv(trk[f"BoundaryNode{i}"])
         nx = [int(n[f"next{k}"]) for k in range(int(n.get("numnextnodes", 0)))]
         pv = [int(n[f"prev{k}"]) for k in range(int(n.get("numprevnodes", 0)))]
-        lines.append("bnode %d %s %s %s %.3f %d %s %d %s" % (
+        lines.append("bnode %d %s %s %s %.3f %d %d %d %d %d %s %d %s" % (
             i, " ".join("%.3f" % v for v in vec(n["position"])), " ".join("%.3f" % v for v in vec(n["leftedge"])),
             " ".join("%.3f" % v for v in vec(n["rightedge"])), num(n.get("distancetofinish")),
+            int(num(n.get("zoneid"), 1)), int(num(n.get("branchid"))), int("noreset" in n), int("progressnode" in n),
             len(nx), " ".join(map(str, nx)), len(pv), " ".join(map(str, pv))))
 
     for p in range(int(kv(trk.get("RaceTrack", [])).get("numaipaths", 1))):

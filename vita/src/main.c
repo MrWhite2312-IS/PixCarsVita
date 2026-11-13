@@ -1324,21 +1324,17 @@ static int run_cutscene(const char *name, char *next, size_t next_size)
 
 /* ------------------------------------------------------------------ race */
 /* A race activity (act/<name>/race.txt): the player (racer slot 0) drives g_car, the others are
-   AI cars with their own .phy and model. shortcut: no car-to-car collisions yet, opponents keep
-   their bind pose (wheels do not turn), no countdown sound. */
+   the game's AI drivers (race.c) with their own .phy and model; the track manager (race.c) runs
+   the countdown, laps and places. shortcut: no car-to-car collisions yet, opponents keep their
+   bind pose (wheels do not turn), no countdown sound. */
 static Race g_race;
 static int g_racing;
-/* the race's track manager (0x22a510): state 2 counting down (+0x34), 1 racing (clock +0x30) */
-static int g_race_state;
-static float g_count_t, g_race_t;
+static RaceTrack g_track;
+static RaceAI g_ai[RACE_MAX_RACERS];
 /* the Countdown overlay (0x3ab120): its own timer (+0xbc) and the value last shown (+0xc0) */
 static float g_hud_t, g_hud_v;
 static int g_hud_on;
-/* per AI: StartDelay left (+0x3dc), counting while the racer's +0x48 bit 0x10 is set (0x388d90) */
-static float g_delay[RACE_MAX_RACERS];
-static int g_delay_on[RACE_MAX_RACERS];
 static void race_hud_update(float dt);
-static RaceState g_rs[RACE_MAX_RACERS];
 static Car g_opp[RACE_MAX_RACERS];      /* slot 0 unused: the player is g_car */
 static CarParams g_opp_par[RACE_MAX_RACERS];
 static VcmModel g_opp_mdl[RACE_MAX_RACERS];
@@ -1354,21 +1350,24 @@ static void race_stop(void)
     g_racing = 0;
 }
 
+static const Car *race_car(int k) { return k ? &g_opp[k] : &g_car; }
+
 static int race_start(const char *name)
 {
     char path[256];
     snprintf(path, sizeof path, DATA_ROOT "act/%s/race.txt", name);
-    int r = race_load(&g_race, path);
+    /* the .rpt section: the profile's difficulty (0x3301d0). shortcut: Normal until the story
+       mode difficulty menu (StoryModeDifficulty) is ported */
+    int r = race_load(&g_race, path, "Normal");
     plog("race %s: %d (%d racers, %d laps)", path, r, g_race.nr, g_race.laps);
     if (r)
         return r;
     race_stop();
-    memset(g_rs, 0, sizeof g_rs);
+    const Car *cars[RACE_MAX_RACERS];
     for (int k = 0; k < g_race.nr; k++) {
         float pos[3], fwd[3];
-        race_grid(&g_race, g_race.racer[k].order, 0, pos, fwd);
+        race_grid(&g_race, g_race.racer[k].order, 0, pos, fwd, NULL);
         float yaw = atan2f(fwd[0], fwd[2]);
-        g_rs[k].seed = 1234u + (unsigned)k;
         Car *c = k ? &g_opp[k] : &g_car;
         if (k) {
             const char *code = g_race.racer[k].code;
@@ -1386,18 +1385,16 @@ static int race_start(const char *name)
             plog("racer %s: model %s", code, g_opp_mdl_ok[k] ? "ok" : "missing");
         }
         car_spawn(c, k ? &g_opp_par[k] : &g_params, &g_col, pos, yaw);
-        race_track(&g_race, &g_rs[k], c->pos);
-        /* 0x3315c0: StartDelay copied to the countdown copy +0x3dc */
-        g_delay[k] = g_race.racer[k].delay;
-        g_delay_on[k] = 0;
         /* 0x22aae0 with HasPaceLap F: every car's controls off for the countdown */
-        c->locked = 1;
+        c->locked = !g_race.has_pace_lap;
+        cars[k] = c;
     }
-    /* 0x22aae0: state 2, 3 s, and message (5,1) with 3.0 starts the Countdown overlay
-       (0x3be8e0 -> 0x3ab4a0: timer = 3, last value 0) */
-    g_race_state = 2;
-    g_count_t = 3.0f;
-    g_race_t = 0;
+    race_track_init(&g_track, &g_race, cars);
+    /* shortcut: the game seeds its rand from the console clock; the port from the process time */
+    unsigned seed = (unsigned)sceKernelGetProcessTimeWide() | 1u;
+    for (int k = 1; k < g_race.nr; k++)
+        race_ai_init(&g_ai[k], &g_race, k, &g_track.rs[k], k == 1 ? seed : 0);
+    /* message (5,1) with 3.0 starts the Countdown overlay (0x3be8e0 -> 0x3ab4a0) */
     g_hud_t = 3.0f;
     g_hud_v = 0;
     g_hud_on = 1;
@@ -1405,74 +1402,29 @@ static int race_start(const char *name)
     return 0;
 }
 
-/* 0x22ac10, the go: controls on (+1015 bit 2) and StartDelay pending (+0x48 bit 0x10) for every
-   racer, then racing */
-static void race_go(void)
-{
-    g_car.locked = 0;
-    for (int k = 1; k < g_race.nr; k++) {
-        g_opp[k].locked = 0;
-        g_delay_on[k] = 1;
-    }
-    g_race_state = 1;
-}
+static int race_place(int k) { return g_track.rs[k].place; }
 
-/* 1-based place: finished racers by finish time, ahead of the rest by race distance. */
-static int race_place(int k)
-{
-    int p = 1;
-    for (int j = 0; j < g_race.nr; j++) {
-        if (j == k)
-            continue;
-        const RaceState *a = &g_rs[j], *b = &g_rs[k];
-        if (a->finished ? (!b->finished || a->finish_time < b->finish_time)
-                        : (!b->finished && race_distance(&g_race, a) > race_distance(&g_race, b)))
-            p++;
-    }
-    return p;
-}
-
-static void race_finish_check(int k)
-{
-    if (!g_rs[k].finished && g_rs[k].lap > g_race.laps) { /* lap counts laps started */
-        g_rs[k].finished = 1;
-        g_rs[k].finish_time = g_race_t;
-    }
-}
-
-/* One frame before the player's car_step: the countdown (0x22a510), the AI cars, laps.
-   Returns 1 once the player has finished. */
+/* One frame before the player's car_step: the track manager (countdown, go, laps) and the AI
+   cars. Returns 1 once the player has finished. */
 static int race_update(CarInput *in, float dt)
 {
     (void)in; /* the player's controls are held by g_car.locked during the countdown */
     race_hud_update(dt);
-    if (g_race_state == 2) {
-        if (g_count_t > 0)
-            g_count_t -= dt;
-        else
-            race_go();
-    } else {
-        g_race_t += dt;
+    const Car *cars[RACE_MAX_RACERS];
+    for (int k = 0; k < g_race.nr; k++)
+        cars[k] = race_car(k);
+    if (race_track_update(&g_track, &g_race, cars, dt)) {
+        /* 0x22ac10, the go: controls on (+1015 bit 2) */
+        g_car.locked = 0;
+        for (int k = 1; k < g_race.nr; k++)
+            g_opp[k].locked = 0;
     }
     for (int k = 1; k < g_race.nr; k++) {
         CarInput ai;
-        race_ai(&g_race, &g_rs[k], k, race_place(k), &g_opp[k], dt, &ai);
-        if (g_delay_on[k]) {
-            /* 0x388d90: while StartDelay runs the AI does not drive: its controls stay as the
-               countdown left them (zero) */
-            g_delay[k] -= dt;
-            if (g_delay[k] >= 0)
-                memset(&ai, 0, sizeof ai);
-            else
-                g_delay_on[k] = 0;
-        }
+        race_ai(&g_ai[k], &g_race, k, &g_track, &g_opp[k], dt, &ai);
         car_step(&g_opp[k], &g_col, &ai, dt);
-        race_track(&g_race, &g_rs[k], g_opp[k].pos);
-        race_finish_check(k);
     }
-    race_track(&g_race, &g_rs[0], g_car.pos);
-    race_finish_check(0);
-    return g_rs[0].finished;
+    return (g_track.rs[0].flags & 1) != 0;
 }
 
 static void race_draw(int lighting)
@@ -1501,7 +1453,8 @@ static void race_hud(void)
 {
     static const uint8_t white[4] = { 255, 255, 255, 255 }, blue[4] = { 115, 154, 167, 255 };
     char s[32];
-    int lap = g_rs[0].lap < 1 ? 1 : (g_rs[0].lap > g_race.laps ? g_race.laps : g_rs[0].lap);
+    /* shortcut: laps done + 1 (at most TotalLaps); STR_LAP_DISPLAY's own formula not traced */
+    int lap = g_track.rs[0].lap + 1 > g_race.laps ? g_race.laps : g_track.rs[0].lap + 1;
     snprintf(s, sizeof s, "%d", race_place(0));
     ui_text(&g_ui, 3, s, 57, 25, 1, white, 2, 0);
     snprintf(s, sizeof s, "/%d", g_race.nr);
@@ -1864,7 +1817,7 @@ int main(void)
                 /* the player finished: the race's NextActivity (CS_1_1Z), then free driving */
                 char next[64];
                 activity_name(next, sizeof next, g_race.next);
-                plog("race finished: place %d in %.2f s -> %s", race_place(0), g_rs[0].finish_time, next);
+                plog("race finished: place %d in %.2f s -> %s", race_place(0), g_track.rs[0].clock, next);
                 g_audio.engine_vol = 0;
                 stop_drive_sounds(&dsfx);
                 race_stop();

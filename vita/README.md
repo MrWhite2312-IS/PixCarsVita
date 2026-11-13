@@ -78,13 +78,14 @@ Copia `extracted/vita/act/` a `ux0:data/pixcars/act/`, la carpeta de cada person
 (`model.vcm`) a `ux0:data/pixcars/<código>/` y `ui/` de nuevo. Aún no se dibujan las
 partículas (humo de los escapes) ni las sombras de los personajes.
 
-La carrera: los cinco en una fila de salida (`StartLineOrder` 1–5, en el orden en que acaba
-CS_1_1C), cuenta atrás de 3 s, los rivales con su `.phy` y la IA siguiendo la línea de carrera del
-juego; posición arriba a la izquierda y vuelta arriba a la derecha con las posiciones, fuentes y
-colores de `RacingOverlays`; al cruzar la meta en la última vuelta, CS_1_1Z.
-Aún falta: los 91 objetos de la carrera de `rr_1_1.toy` (barreras `RB_V1*`, barriles, conos, pancartas
-y línea de meta), choques entre coches, ruedas de los rivales, transiciones e iconos del marcador,
-Tiempo/En cabeza/Mejor vuelta y el mapa de carrera.
+La carrera sigue el código del juego de PS2 (`race.c`): los cinco en una fila de salida
+(`StartLineOrder` 1–5), cuenta atrás de 3 s con los controles bloqueados, el conductor IA del
+juego (dirección, acelerador/freno, punto 60 ft por delante en la línea, desvío aleatorio, tiempos
+de vuelta del `.rpt` por corredor con el ajuste al jugador) y el gestor de vueltas del juego
+(vueltas, posición, distancia a meta). Dificultad Normal hasta portar su menú.
+Aún falta: recolocar el coche al salirse o ir en dirección contraria, que la IA esquive a otros
+coches, sus derrapes/saltos, los 91 objetos de `rr_1_1.toy`, choques entre coches, ruedas de los
+rivales y el resto del marcador.
 
 ## 3. Compilar
 
