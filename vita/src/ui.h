@@ -1,6 +1,6 @@
 /*
  * PixCarsVita - the game's front-end UI: fonts, strings and layers exported by tools/vitaui.py
- * (ui.vcs textures + ui.txt), drawn in the game's 640x480 UI space mapped onto the Vita screen.
+ * (ui.vcs textures + ui.txt), drawn in the game's 640x448 UI space mapped onto the Vita screen.
  */
 #ifndef PIXCARS_UI_H
 #define PIXCARS_UI_H

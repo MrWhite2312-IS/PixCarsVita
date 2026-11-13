@@ -14,11 +14,12 @@
 
 #define SCREEN_W 960.0f
 #define SCREEN_H 544.0f
-/* The game lays its UI out on a 640x480 screen. Positions stretch to the Vita's 16:9;
-   text keeps its proportions (vertical factor on both axes).
-   shortcut: icons stretch with the screen; revisit if a widescreen layout is wanted. */
+/* The game lays its UI out on a 640x448 screen: its scale is width / 640, height / 448
+   (PS2 0x1785e0; the Letterbox layer's bars, 0..86 and 354..448, fill exactly that height).
+   Positions stretch to the Vita's 16:9; text keeps its proportions (vertical factor on both
+   axes). shortcut: icons stretch with the screen; revisit if a widescreen layout is wanted. */
 #define SX (SCREEN_W / 640.0f)
-#define SY (SCREEN_H / 480.0f)
+#define SY (SCREEN_H / 448.0f)
 
 static int find_font(const Ui *ui, const char *name)
 {
@@ -229,7 +230,7 @@ static float text_width(const UiFont *fo, const char *s)
     return w;
 }
 
-/* x, y in 640x480 UI space. The .cel's two signed values are the glyph's left and right
+/* x, y in 640x448 UI space. The .cel's two signed values are the glyph's left and right
    overlaps (xoff, yoff), not an x/y offset: every cell is the full line height, so glyphs share
    one top; the quad starts at pen + xoff and the pen advances w + xoff + yoff. Using yoff as a
    vertical shift made letters jump (START's T up 5, its A down). */

@@ -17,7 +17,7 @@ Output in <out_dir>:
     sign <ID> <tex> <desc ID or -> <r> <g> <b> <a>   one of its items, its tint
     camera <name> <px> <py> <pz> <fx> <fy> <fz> <fov>  front-end animated camera (game space;
                                                      fov: horizontal degrees on 4:3, 0 if none)
-  Coordinates are the game's 640x480 UI space; hj/vj: 0 left/top, 1 centre, 2 right/bottom.
+  Coordinates are the game's 640x448 UI space; hj/vj: 0 left/top, 1 centre, 2 right/bottom.
 
 .cel font: f32 ?, u32 0, u32 n_glyphs, then per glyph (unaligned):
   u32 code; f32 u0, v0, u1, v1; u16 code; u16 0; u16 w; s16 xoff; s16 yoff; u16 h;
